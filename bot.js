@@ -386,12 +386,18 @@ async function sendVideoInfo(ctx, video) {
   const duration = video.duration || "Неизвестно";
   const views = video.watchCount ? formatNumber(video.watchCount) : "Неизвестно";
   const url = video.url;
+  const videoId = video.videoId;
   
   const text = 
     `<b>${escapeHtml(title)}</b>\n\n` +
     `⏱ Длительность: ${duration}\n` +
-    `👁 Просмотров: ${views}\n` +
-    (url ? `\n🔗 <a href="${url}">Смотреть</a>` : "");
+    `👁 Просмотров: ${views}` +
+    (url ? `\n\n🔗 <a href="${url}">Смотреть на Pornhub</a>` : "");
+  
+  const keyboard = new InlineKeyboard()
+    .url("🎬 Смотреть", url || `https://www.pornhub.com/view_video.php?viewkey=${videoId}`)
+    .row()
+    .text("📥 Скачать", `download_${videoId}`);
   
   const thumbnail = video.thumbnailUrl;
   
@@ -400,6 +406,7 @@ async function sendVideoInfo(ctx, video) {
       await ctx.replyWithPhoto(thumbnail, {
         caption: text,
         parse_mode: "HTML",
+        reply_markup: keyboard,
       });
       return;
     } catch (e) {
@@ -407,8 +414,54 @@ async function sendVideoInfo(ctx, video) {
     }
   }
   
-  await ctx.reply(text, { parse_mode: "HTML" });
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
+
+bot.callbackQuery(/^download_/, async (ctx) => {
+  const videoId = ctx.callbackQuery.data.slice(9);
+  
+  try {
+    await ctx.answerCallbackQuery({ text: "Получаю ссылки на скачивание...", show_alert: false });
+    
+    const video = await pornhub.videos.details({ 
+      url: `https://www.pornhub.com/view_video.php?viewkey=${videoId}` 
+    });
+    
+    const files = video.files || {};
+    const links = [];
+    
+    if (files.high) {
+      links.push(`📥 <b>Высокое качество (720p+):</b>\n${files.high}`);
+    }
+    if (files.low) {
+      links.push(`📥 <b>Среднее качество:</b>\n${files.low}`);
+    }
+    if (files.HLS) {
+      links.push(`📥 <b>HLS (стриминг):</b>\n${files.HLS}`);
+    }
+    
+    if (links.length > 0) {
+      await ctx.reply(
+        `<b>Ссылки для скачивания:</b>\n\n${links.join("\n\n")}\n\n` +
+        `<i>💡 Скопируйте ссылку и вставьте в браузер для скачивания</i>`,
+        { parse_mode: "HTML" }
+      );
+    } else {
+      await ctx.reply(
+        "Не удалось получить прямые ссылки.\n\n" +
+        "Попробуйте скачать через онлайн-сервис:\n" +
+        `https://www.y2mate.com/pornhub?url=${encodeURIComponent(video.url)}`
+      );
+    }
+  } catch (error) {
+    console.error("Download error:", error);
+    await ctx.reply(
+      "Ошибка при получении ссылок.\n\n" +
+      "Попробуйте скачать через онлайн-сервис:\n" +
+      `https://www.p2mp4.com/video/${videoId}`
+    );
+  }
+});
 
 async function sendVideoDetails(ctx, video) {
   const title = video.title || "Без названия";
@@ -419,6 +472,12 @@ async function sendVideoDetails(ctx, video) {
   const url = video.url;
   const tags = video.tags?.slice(0, 5).join(", ") || "Нет";
   const categories = video.categories?.slice(0, 3).join(", ") || "Нет";
+  const files = video.files || {};
+  
+  const downloadLinks = [];
+  if (files.high) downloadLinks.push(`📥 Высокое качество`);
+  if (files.low) downloadLinks.push(`📥 Среднее качество`);
+  if (files.HLS) downloadLinks.push(`📥 HLS`);
   
   const text = 
     `<b>${escapeHtml(title)}</b>\n\n` +
@@ -426,16 +485,21 @@ async function sendVideoDetails(ctx, video) {
     `👁 Просмотров: ${views}\n` +
     `⭐ Рейтинг: ${rating} (${votes} голосов)\n` +
     `📂 Категории: ${categories}\n` +
-    `🏷 Теги: ${tags}\n` +
-    (url ? `\n🔗 <a href="${url}">Смотреть</a>` : "");
+    `🏷 Теги: ${tags}`;
   
-  const thumbnail = video.thumbnailUrls?.[0] || video.files?.thumb;
+  const keyboard = new InlineKeyboard()
+    .url("🎬 Смотреть", url)
+    .row()
+    .text("📥 Скачать", `download_${video.videoId}`);
+  
+  const thumbnail = video.thumbnailUrls?.[0] || files.thumb;
   
   if (thumbnail) {
     try {
       await ctx.replyWithPhoto(thumbnail, {
         caption: text,
         parse_mode: "HTML",
+        reply_markup: keyboard,
       });
       return;
     } catch (e) {
@@ -443,7 +507,7 @@ async function sendVideoDetails(ctx, video) {
     }
   }
   
-  await ctx.reply(text, { parse_mode: "HTML" });
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
 
 function formatNumber(num) {
