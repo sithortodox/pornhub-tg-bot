@@ -767,35 +767,133 @@ async function postVideoToChannel() {
     const duration = details.duration || "Неизвестно";
     const views = details.watchCount ? formatNumber(details.watchCount) : "Неизвестно";
     const url = details.url;
+    const videoId = details.videoId;
     
-    const text = 
-      `🔥 <b>${escapeHtml(title)}</b>\n\n` +
-      `⏱ ${duration} | 👁 ${views}\n\n` +
-      `🔗 <a href="${url}">Смотреть на Pornhub</a>`;
+    const files = details.files || {};
+    const videoUrl = files.low || files.high || files.HLS;
     
-    const keyboard = new InlineKeyboard()
-      .url("🎬 Смотреть", url)
-      .row()
-      .text("📥 Скачать", `download_${details.videoId}`);
+    if (!videoUrl) {
+      console.log("No video URL found, posting as link...");
+      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+      return;
+    }
     
-    const thumbnail = details.thumbnailUrls?.[0] || details.files?.thumb;
+    const inputFile = join(TMP_DIR, `${videoId}_channel.mp4`);
+    const compressedFile = join(TMP_DIR, `${videoId}_channel_compressed.mp4`);
     
-    if (thumbnail) {
-      try {
-        await bot.api.sendPhoto(CHANNEL_ID, thumbnail, {
-          caption: text,
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-        });
-      } catch (e) {
-        console.error("Photo error, sending text:", e);
-        await bot.api.sendMessage(CHANNEL_ID, text, {
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-        });
+    console.log(`Downloading video for channel: ${title}`);
+    
+    try {
+      const response = await axios({
+        method: "get",
+        url: videoUrl,
+        responseType: "stream",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://www.pornhub.com/"
+        }
+      });
+      
+      const writer = createWriteStream(inputFile);
+      response.data.pipe(writer);
+      
+      await new Promise((resolve, reject) => {
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+      });
+      
+      const stats = statSync(inputFile);
+      const sizeMB = stats.size / (1024 * 1024);
+      
+      console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
+      
+      let fileToSend = inputFile;
+      
+      if (sizeMB > 48) {
+        console.log(`Compressing video from ${sizeMB.toFixed(1)} MB...`);
+        
+        try {
+          await compressVideo(inputFile, compressedFile);
+          
+          if (existsSync(compressedFile)) {
+            const compressedStats = statSync(compressedFile);
+            const compressedSizeMB = compressedStats.size / (1024 * 1024);
+            
+            console.log(`Compressed: ${compressedSizeMB.toFixed(2)} MB`);
+            
+            if (compressedSizeMB < 48) {
+              fileToSend = compressedFile;
+            } else {
+              console.log("Video too large even after compression, posting as link...");
+              cleanup([inputFile, compressedFile]);
+              await postAsLink(CHANNEL_ID, details, postedVideos, source);
+              return;
+            }
+          }
+        } catch (compressError) {
+          console.error("Compression failed:", compressError);
+          cleanup([inputFile, compressedFile]);
+          await postAsLink(CHANNEL_ID, details, postedVideos, source);
+          return;
+        }
       }
+      
+      const finalStats = statSync(fileToSend);
+      const finalSizeMB = finalStats.size / (1024 * 1024);
+      
+      const caption = `🔥 <b>${escapeHtml(title)}</b>\n\n⏱ ${duration} | 👁 ${views} | 📦 ${finalSizeMB.toFixed(1)} MB`;
+      
+      await bot.api.sendVideo(CHANNEL_ID, new InputFile(fileToSend), {
+        caption: caption,
+        parse_mode: "HTML",
+        supports_streaming: true
+      });
+      
+      cleanup([inputFile, compressedFile]);
+      
+      postedVideos.push(details.videoId);
+      savePostedVideos(postedVideos);
+      
+      console.log(`Posted video to channel: ${title} (${finalSizeMB.toFixed(1)} MB, source: ${source})`);
+      
+    } catch (downloadError) {
+      console.error("Download error:", downloadError);
+      cleanup([inputFile, compressedFile]);
+      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+    }
+    
+  } catch (e) {
+    console.error("Error posting video:", e);
+  }
+}
+
+async function postAsLink(channelId, details, postedVideos, source) {
+  const title = details.title || "Без названия";
+  const duration = details.duration || "Неизвестно";
+  const views = details.watchCount ? formatNumber(details.watchCount) : "Неизвестно";
+  const url = details.url;
+  
+  const text = 
+    `🔥 <b>${escapeHtml(title)}</b>\n\n` +
+    `⏱ ${duration} | 👁 ${views}\n\n` +
+    `🔗 <a href="${url}">Смотреть на Pornhub</a>`;
+  
+  const keyboard = new InlineKeyboard()
+    .url("🎬 Смотреть", url)
+    .row()
+    .text("📥 Скачать", `download_${details.videoId}`);
+  
+  const thumbnail = details.thumbnailUrls?.[0] || details.files?.thumb;
+  
+  try {
+    if (thumbnail) {
+      await bot.api.sendPhoto(channelId, thumbnail, {
+        caption: text,
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
     } else {
-      await bot.api.sendMessage(CHANNEL_ID, text, {
+      await bot.api.sendMessage(channelId, text, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       });
@@ -803,11 +901,9 @@ async function postVideoToChannel() {
     
     postedVideos.push(details.videoId);
     savePostedVideos(postedVideos);
-    
-    console.log(`Posted video to channel: ${title} (source: ${source})`);
-    
+    console.log(`Posted as link: ${title} (source: ${source})`);
   } catch (e) {
-    console.error("Error posting video:", e);
+    console.error("Error posting link:", e);
   }
 }
 
