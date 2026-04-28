@@ -42,20 +42,26 @@ bot.hears("Поиск видео", async (ctx) => {
 });
 
 bot.hears("Популярные", async (ctx) => {
+  console.log("Popular button pressed");
   try {
     await ctx.reply("Загружаю популярные видео...");
+    console.log("Calling pornhub.videos.mostViewed...");
     const result = await pornhub.videos.mostViewed({ page: 1 });
+    console.log("Result:", JSON.stringify(result).substring(0, 200));
     
     if (result.videos && result.videos.length > 0) {
+      console.log(`Found ${result.videos.length} videos`);
       for (const video of result.videos.slice(0, 5)) {
         await sendVideoInfo(ctx, video);
       }
     } else {
+      console.log("No videos in result");
       await ctx.reply("Не удалось получить видео.");
     }
   } catch (error) {
-    console.error("Popular error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    console.error("Popular error:", error.message);
+    console.error("Stack:", error.stack);
+    await ctx.reply("Ошибка при получении видео: " + error.message);
   }
 });
 
@@ -98,6 +104,18 @@ bot.hears("Рекомендуемые", async (ctx) => {
 bot.hears("По ссылке", async (ctx) => {
   ctx.session = { state: "url" };
   await ctx.reply("Отправьте ссылку на видео с Pornhub:");
+});
+
+bot.hears("Категории", async (ctx) => {
+  await ctx.reply("Функция категорий временно недоступна. Используйте /popular или /newest для просмотра видео.");
+});
+
+bot.hears("Теги", async (ctx) => {
+  await ctx.reply("Функция тегов временно недоступна. Используйте /search для поиска видео.");
+});
+
+bot.hears("Порнозвёзды", async (ctx) => {
+  await ctx.reply("Функция списка порнозвёзд временно недоступна. Используйте /search для поиска видео.");
 });
 
 bot.command("popular", async (ctx) => {
