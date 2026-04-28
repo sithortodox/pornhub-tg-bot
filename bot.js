@@ -157,24 +157,63 @@ bot.hears("Поиск видео", async (ctx) => {
 bot.hears("Категории", async (ctx) => {
   ctx.session.state = null;
   try {
-    await ctx.reply("Загружаю категории...");
     const categories = await getCategories();
-    
-    const keyboard = new InlineKeyboard();
-    const columns = 3;
-    
-    for (let i = 0; i < Math.min(categories.length, 30); i++) {
-      keyboard.text(categories[i].name, `cat_${categories[i].slug}`);
-      if ((i + 1) % columns === 0) {
-        keyboard.row();
-      }
-    }
-    
-    await ctx.reply("Выберите категорию:", { reply_markup: keyboard });
+    await showCategoriesPage(ctx, categories, 0);
   } catch (error) {
     console.error("Categories error:", error);
     await ctx.reply("Ошибка при получении категорий.");
   }
+});
+
+async function showCategoriesPage(ctx, categories, page) {
+  const perPage = 20;
+  const start = page * perPage;
+  const end = start + perPage;
+  const pageCategories = categories.slice(start, end);
+  const totalPages = Math.ceil(categories.length / perPage);
+  
+  const keyboard = new InlineKeyboard();
+  const columns = 2;
+  
+  for (let i = 0; i < pageCategories.length; i++) {
+    keyboard.text(pageCategories[i].name, `cat_${pageCategories[i].slug}`);
+    if ((i + 1) % columns === 0) {
+      keyboard.row();
+    }
+  }
+  
+  keyboard.row();
+  
+  if (page > 0) {
+    keyboard.text("◀️ Назад", `catpage_${page - 1}`);
+  }
+  
+  keyboard.text(`${page + 1}/${totalPages}`, "noop");
+  
+  if (end < categories.length) {
+    keyboard.text("Вперёд ▶️", `catpage_${page + 1}`);
+  }
+  
+  const text = page === 0 && !ctx.callbackQuery
+    ? "Выберите категорию:"
+    : `Категории (страница ${page + 1}/${totalPages})`;
+  
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(text, { reply_markup: keyboard });
+  } else {
+    await ctx.reply(text, { reply_markup: keyboard });
+  }
+}
+
+bot.callbackQuery(/^catpage_/, async (ctx) => {
+  const page = parseInt(ctx.callbackQuery.data.slice(8));
+  const categories = await getCategories();
+  await ctx.answerCallbackQuery();
+  await showCategoriesPage(ctx, categories, page);
+});
+
+bot.callbackQuery("noop", async (ctx) => {
+  await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^cat_/, async (ctx) => {
