@@ -592,6 +592,38 @@ function compressVideo(input, output) {
   });
 }
 
+function downloadHLS(hlsUrl, output) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn("ffmpeg", [
+      "-i", hlsUrl,
+      "-y",
+      "-c", "copy",
+      "-bsf:a", "aac_adtstoasc",
+      "-movflags", "+faststart",
+      output
+    ]);
+    
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg HLS download exited with code ${code}`));
+      }
+    });
+    
+    ffmpeg.on("error", reject);
+    
+    setTimeout(() => {
+      ffmpeg.kill();
+      reject(new Error("HLS download timeout"));
+    }, 180000);
+  });
+}
+    
+    ffmpeg.on("error", reject);
+  });
+}
+
 function cleanup(files) {
   for (const file of files) {
     try {
@@ -772,73 +804,94 @@ async function postVideoToChannel() {
     const files = details.files || {};
     console.log("Available files:", JSON.stringify(files).substring(0, 500));
     
-    let videoUrl = files.low || files.high;
+    let hlsUrl = files.HLS;
+    if (hlsUrl && hlsUrl.startsWith("//")) {
+      hlsUrl = "https:" + hlsUrl;
+    }
     
+    let videoUrl = files.low || files.high;
     if (videoUrl && videoUrl.startsWith("//")) {
       videoUrl = "https:" + videoUrl;
     }
     
-    if (!videoUrl && files.HLS) {
-      videoUrl = files.HLS;
-      if (videoUrl.startsWith("//")) {
-        videoUrl = "https:" + videoUrl;
-      }
-    }
-    
     console.log(`Video URL: ${videoUrl?.substring(0, 100)}`);
-    
-    if (!videoUrl) {
-      console.log("No video URL found, posting as link...");
-      await postAsLink(CHANNEL_ID, details, postedVideos, source);
-      return;
-    }
+    console.log(`HLS URL: ${hlsUrl?.substring(0, 100)}`);
     
     const inputFile = join(TMP_DIR, `${videoId}_channel.mp4`);
     const compressedFile = join(TMP_DIR, `${videoId}_channel_compressed.mp4`);
     
-    console.log(`Downloading video for channel: ${title}`);
+    let downloadSuccess = false;
     
-    try {
-      const response = await axios({
-        method: "get",
-        url: videoUrl,
-        responseType: "stream",
-        timeout: 120000,
-        maxRedirects: 5,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "*/*",
-          "Accept-Encoding": "identity",
-          "Referer": "https://www.pornhub.com/",
-          "Origin": "https://www.pornhub.com"
+    if (hlsUrl) {
+      console.log("Trying to download via HLS with ffmpeg...");
+      try {
+        await downloadHLS(hlsUrl, inputFile);
+        if (existsSync(inputFile)) {
+          const stats = statSync(inputFile);
+          if (stats.size > 10000) {
+            downloadSuccess = true;
+            console.log(`HLS download success: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          }
         }
-      });
-      
-      console.log(`Response status: ${response.status}, Content-Length: ${response.headers['content-length']}`);
-      
-      const writer = createWriteStream(inputFile);
-      response.data.pipe(writer);
-      
-      await new Promise((resolve, reject) => {
-        writer.on("finish", resolve);
-        writer.on("error", reject);
-      });
-      
-      const stats = statSync(inputFile);
-      const sizeMB = stats.size / (1024 * 1024);
-      
-      console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
-      
-      if (sizeMB < 0.1) {
-        console.log("File too small, posting as link...");
-        cleanup([inputFile]);
-        await postAsLink(CHANNEL_ID, details, postedVideos, source);
-        return;
+      } catch (e) {
+        console.log("HLS download failed:", e.message);
       }
+    }
+    
+    if (!downloadSuccess && videoUrl) {
+      console.log(`Downloading video for channel: ${title}`);
       
-      let fileToSend = inputFile;
-      
-      if (sizeMB > 48) {
+      try {
+        const response = await axios({
+          method: "get",
+          url: videoUrl,
+          responseType: "arraybuffer",
+          timeout: 120000,
+          maxRedirects: 10,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://www.pornhub.com/",
+          }
+        });
+        
+        console.log(`Response status: ${response.status}, Content-Length: ${response.headers['content-length']}, Content-Type: ${response.headers['content-type']}`);
+        
+        const buffer = Buffer.from(response.data);
+        console.log(`Buffer size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
+        
+        if (buffer.length > 10000) {
+          require("fs").writeFileSync(inputFile, buffer);
+          downloadSuccess = true;
+        }
+        
+      } catch (e) {
+        console.log("Direct download failed:", e.message);
+      }
+    }
+    
+    if (!downloadSuccess) {
+      console.log("All download methods failed, posting as link...");
+      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+      return;
+    }
+    
+    const stats = statSync(inputFile);
+    const sizeMB = stats.size / (1024 * 1024);
+    
+    console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
+    
+    if (sizeMB < 0.1) {
+      console.log("File too small, posting as link...");
+      cleanup([inputFile]);
+      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+      return;
+    }
+    
+    let fileToSend = inputFile;
+    
+    if (sizeMB > 48) {
         console.log(`Compressing video from ${sizeMB.toFixed(1)} MB...`);
         
         try {
