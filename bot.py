@@ -1,16 +1,14 @@
 import os
 import logging
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-from pornhub_api import PornhubApi
-from pornhub_api.backends.aiohttp import AioHttpBackend
+import aiohttp
 
 load_dotenv()
 
@@ -22,26 +20,13 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+BASE_URL = "https://www.pornhub.com/webmaster"
+
 
 class Form(StatesGroup):
     search = State()
     video_id = State()
     tag_search = State()
-    category_browse = State()
-
-
-ORDERING_OPTIONS = {
-    "featured": "Рекомендуемые",
-    "newest": "Новые",
-    "mostviewed": "Популярные",
-    "rating": "По рейтингу"
-}
-
-PERIOD_OPTIONS = {
-    "weekly": "За неделю",
-    "monthly": "За месяц",
-    "alltime": "За всё время"
-}
 
 
 def get_main_keyboard():
@@ -56,9 +41,54 @@ def get_main_keyboard():
     return kb
 
 
-async def get_api():
-    backend = AioHttpBackend()
-    return PornhubApi(backend=backend), backend
+async def fetch(endpoint: str, params: dict = None) -> dict:
+    async with aiohttp.ClientSession() as session:
+        url = f"{BASE_URL}{endpoint}"
+        async with session.get(url, params=params) as resp:
+            return await resp.json()
+
+
+async def search_videos(q: str = "", category: str = None, tags: List[str] = None,
+                        phrase: List[str] = None, ordering: str = None, period: str = None) -> list:
+    params = {"search": q}
+    if category:
+        params["category"] = category
+    if ordering:
+        params["ordering"] = ordering
+    if tags:
+        params["tags[]"] = ",".join(tags)
+    if phrase:
+        params["phrase[]"] = ",".join(phrase)
+    if period:
+        params["period"] = period
+    
+    data = await fetch("/search", params)
+    return data.get("videos", [])
+
+
+async def get_video_by_id(video_id: str) -> dict:
+    return await fetch("/video_by_id", {"id": video_id})
+
+
+async def is_video_active(video_id: str) -> bool:
+    data = await fetch("/is_video_active", {"id": video_id})
+    return data.get("active", False)
+
+
+async def get_categories() -> list:
+    data = await fetch("/categories")
+    return data.get("categories", [])
+
+
+async def get_tags(letter: str) -> list:
+    data = await fetch("/tags", {"list": letter})
+    return data.get("tags", [])
+
+
+async def get_stars(detailed: bool = False) -> list:
+    endpoint = "/stars_detailed" if detailed else "/stars"
+    data = await fetch(endpoint)
+    return data.get("stars", [])
 
 
 @dp.message(Command("start"))
@@ -101,53 +131,46 @@ async def process_search(message: types.Message, state: FSMContext):
     query = message.text.strip()
     await state.clear()
     
-    api, backend = await get_api()
     try:
-        results = await api.search.search_videos(q=query, ordering="mostviewed")
+        videos = await search_videos(q=query, ordering="mostviewed")
         
-        if results.videos:
+        if videos:
             await message.answer(f"Найдено видео по запросу '{query}':")
-            for video in results.videos[:5]:
+            for video in videos[:5]:
                 await send_video_info(message, video)
         else:
             await message.answer("Ничего не найдено.")
     except Exception as e:
         logger.error(f"Search error: {e}")
         await message.answer("Ошибка при поиске.")
-    finally:
-        await backend.close()
 
 
 @dp.message(F.text == "Популярные")
 @dp.message(Command("popular"))
 async def show_popular(message: types.Message):
-    api, backend = await get_api()
     try:
-        results = await api.search.search_videos(ordering="mostviewed", period="weekly")
+        videos = await search_videos(ordering="mostviewed", period="weekly")
         
-        if results.videos:
+        if videos:
             await message.answer("Популярные видео за неделю:")
-            for video in results.videos[:5]:
+            for video in videos[:5]:
                 await send_video_info(message, video)
         else:
             await message.answer("Не удалось получить популярные видео.")
     except Exception as e:
         logger.error(f"Popular error: {e}")
         await message.answer("Ошибка при получении видео.")
-    finally:
-        await backend.close()
 
 
 @dp.message(F.text == "Категории")
 @dp.message(Command("categories"))
-async def show_categories(message: types.Message, state: FSMContext):
-    api, backend = await get_api()
+async def show_categories(message: types.Message):
     try:
-        categories = await api.video.categories()
+        categories = await get_categories()
         
         builder = InlineKeyboardBuilder()
-        for cat in categories.categories[:20]:
-            builder.row(InlineKeyboardButton(
+        for cat in categories[:20]:
+            builder.row(types.InlineKeyboardButton(
                 text=cat,
                 callback_data=f"cat_{cat}"
             ))
@@ -159,21 +182,18 @@ async def show_categories(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Categories error: {e}")
         await message.answer("Ошибка при получении категорий.")
-    finally:
-        await backend.close()
 
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def category_callback(callback: types.CallbackQuery):
     category = callback.data[4:]
     
-    api, backend = await get_api()
     try:
-        results = await api.search.search_videos(category=category, ordering="mostviewed")
+        videos = await search_videos(category=category, ordering="mostviewed")
         
-        if results.videos:
+        if videos:
             await callback.message.answer(f"Видео в категории '{category}':")
-            for video in results.videos[:5]:
+            for video in videos[:5]:
                 await send_video_info(callback.message, video)
         else:
             await callback.message.answer("В этой категории нет видео.")
@@ -181,15 +201,11 @@ async def category_callback(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Category videos error: {e}")
         await callback.message.answer("Ошибка при получении видео.")
-    finally:
-        await backend.close()
 
 
 @dp.message(F.text == "Теги")
 async def show_tags_menu(message: types.Message, state: FSMContext):
-    await message.answer(
-        "Введите букву для поиска тегов (a-z):"
-    )
+    await message.answer("Введите букву для поиска тегов (a-z):")
     await state.set_state(Form.tag_search)
 
 
@@ -203,13 +219,12 @@ async def process_tag_search(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    api, backend = await get_api()
     try:
-        tags = await api.video.tags(letter)
+        tags = await get_tags(letter)
         
         builder = InlineKeyboardBuilder()
-        for tag in tags.tags[:15]:
-            builder.row(InlineKeyboardButton(
+        for tag in tags[:15]:
+            builder.row(types.InlineKeyboardButton(
                 text=tag,
                 callback_data=f"tag_{tag}"
             ))
@@ -221,21 +236,18 @@ async def process_tag_search(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Tags error: {e}")
         await message.answer("Ошибка при получении тегов.")
-    finally:
-        await backend.close()
 
 
 @dp.callback_query(F.data.startswith("tag_"))
 async def tag_callback(callback: types.CallbackQuery):
     tag = callback.data[4:]
     
-    api, backend = await get_api()
     try:
-        results = await api.search.search_videos(tags=[tag], ordering="mostviewed")
+        videos = await search_videos(tags=[tag], ordering="mostviewed")
         
-        if results.videos:
+        if videos:
             await callback.message.answer(f"Видео с тегом '{tag}':")
-            for video in results.videos[:5]:
+            for video in videos[:5]:
                 await send_video_info(callback.message, video)
         else:
             await callback.message.answer("Нет видео с таким тегом.")
@@ -243,23 +255,20 @@ async def tag_callback(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Tag videos error: {e}")
         await callback.message.answer("Ошибка при получении видео.")
-    finally:
-        await backend.close()
 
 
 @dp.message(F.text == "Порнозвёзды")
 @dp.message(Command("stars"))
 async def show_stars(message: types.Message):
-    api, backend = await get_api()
     try:
-        stars = await api.stars.all_detailed()
+        stars = await get_stars(detailed=True)
         
         builder = InlineKeyboardBuilder()
-        for star in stars.stars[:15]:
-            name = star.name[:20]
-            builder.row(InlineKeyboardButton(
+        for star in stars[:15]:
+            name = star.get("name", "Unknown")[:20]
+            builder.row(types.InlineKeyboardButton(
                 text=name,
-                callback_data=f"star_{star.name}"
+                callback_data=f"star_{star.get('name', 'unknown')}"
             ))
         
         await message.answer(
@@ -269,21 +278,18 @@ async def show_stars(message: types.Message):
     except Exception as e:
         logger.error(f"Stars error: {e}")
         await message.answer("Ошибка при получении списка звёзд.")
-    finally:
-        await backend.close()
 
 
 @dp.callback_query(F.data.startswith("star_"))
 async def star_callback(callback: types.CallbackQuery):
     star_name = callback.data[5:]
     
-    api, backend = await get_api()
     try:
-        results = await api.search.search_videos(phrase=[star_name], ordering="mostviewed")
+        videos = await search_videos(phrase=[star_name], ordering="mostviewed")
         
-        if results.videos:
+        if videos:
             await callback.message.answer(f"Видео с {star_name}:")
-            for video in results.videos[:5]:
+            for video in videos[:5]:
                 await send_video_info(callback.message, video)
         else:
             await callback.message.answer("Нет видео с этим актёром.")
@@ -291,8 +297,6 @@ async def star_callback(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Star videos error: {e}")
         await callback.message.answer("Ошибка при получении видео.")
-    finally:
-        await backend.close()
 
 
 @dp.message(F.text == "По ID видео")
@@ -306,29 +310,26 @@ async def process_video_id(message: types.Message, state: FSMContext):
     video_id = message.text.strip()
     await state.clear()
     
-    api, backend = await get_api()
     try:
-        is_active = await api.video.is_active(video_id)
+        active = await is_video_active(video_id)
         
-        if not is_active.is_active:
+        if not active:
             await message.answer("Видео не найдено или удалено.")
             return
         
-        video = await api.video.get_by_id(video_id)
+        video = await get_video_by_id(video_id)
         await send_video_info(message, video)
     except Exception as e:
         logger.error(f"Video ID error: {e}")
         await message.answer("Ошибка при получении видео.")
-    finally:
-        await backend.close()
 
 
-async def send_video_info(message: types.Message, video):
-    title = video.title[:100] if video.title else "Без названия"
-    duration = video.duration or "Неизвестно"
-    views = video.views or "Неизвестно"
-    rating = video.rating or "Неизвестно"
-    url = video.url or ""
+async def send_video_info(message: types.Message, video: dict):
+    title = video.get("title", "Без названия")[:100]
+    duration = video.get("duration", "Неизвестно")
+    views = video.get("views", "Неизвестно")
+    rating = video.get("rating", "Неизвестно")
+    url = video.get("url", "")
     
     text = (
         f"<b>{title}</b>\n\n"
@@ -340,10 +341,10 @@ async def send_video_info(message: types.Message, video):
     if url:
         text += f"\n🔗 <a href='{url}'>Смотреть</a>"
     
-    if hasattr(video, 'thumbnails') and video.thumbnails:
-        thumb_url = video.thumbnails[0] if isinstance(video.thumbnails, list) else video.thumbnails
+    thumb = video.get("default_thumb") or video.get("thumb")
+    if thumb:
         try:
-            await message.answer_photo(thumb_url, caption=text, parse_mode="HTML")
+            await message.answer_photo(thumb, caption=text, parse_mode="HTML")
             return
         except Exception:
             pass
