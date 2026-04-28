@@ -3,7 +3,7 @@ import pornhub from "pornhub";
 import { load } from "cheerio";
 import axios from "axios";
 import { spawn } from "child_process";
-import { createWriteStream, existsSync, statSync, unlinkSync, mkdirSync, createReadStream } from "fs";
+import { createWriteStream, existsSync, statSync, unlinkSync, mkdirSync, createReadStream, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 
@@ -12,10 +12,49 @@ if (!existsSync(TMP_DIR)) {
   mkdirSync(TMP_DIR, { recursive: true });
 }
 
+const DATA_DIR = "/app/data";
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const POSTED_VIDEOS_FILE = join(DATA_DIR, "posted_videos.json");
+const CHANNEL_ID = process.env.CHANNEL_ID;
+
+function loadPostedVideos() {
+  if (existsSync(POSTED_VIDEOS_FILE)) {
+    try {
+      const data = readFileSync(POSTED_VIDEOS_FILE, "utf8");
+      return JSON.parse(data);
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function savePostedVideos(videos) {
+  writeFileSync(POSTED_VIDEOS_FILE, JSON.stringify(videos.slice(-1000)));
+}
+
 const TOKEN = process.env.BOT_TOKEN;
 const bot = new Bot(TOKEN);
 
 const CATEGORIES_CACHE = { data: null, timestamp: 0 };
+
+const EXCLUDED_CATEGORIES = ["gay", "transgender", "trans", "twink", "bisexual"];
+
+function filterVideoByCategories(video) {
+  const categories = video.categories || [];
+  const tags = video.tags || [];
+  const allTerms = [...categories, ...tags].map(t => t.toLowerCase());
+  
+  for (const excluded of EXCLUDED_CATEGORIES) {
+    if (allTerms.some(term => term.includes(excluded))) {
+      return false;
+    }
+  }
+  return true;
+}
 
 bot.use(
   session({
@@ -629,5 +668,186 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+async function getRandomVideoFromCategory(category) {
+  try {
+    const result = await pornhub.videos.search({ 
+      search: category.replace(/-/g, " "),
+      page: Math.floor(Math.random() * 5) + 1
+    });
+    
+    const postedVideos = loadPostedVideos();
+    const filtered = result.videos.filter(v => 
+      !postedVideos.includes(v.videoId)
+    );
+    
+    if (filtered.length > 0) {
+      const randomIndex = Math.floor(Math.random() * Math.min(10, filtered.length));
+      return filtered[randomIndex];
+    }
+    return result.videos[Math.floor(Math.random() * result.videos.length)];
+  } catch (e) {
+    console.error(`Error getting video from category ${category}:`, e);
+    return null;
+  }
+}
+
+async function getUnpostedVideo(source = "popular") {
+  const postedVideos = loadPostedVideos();
+  
+  let videos = [];
+  try {
+    if (source === "popular") {
+      const result = await pornhub.videos.mostViewed({ page: Math.floor(Math.random() * 3) + 1 });
+      videos = result.videos || [];
+    } else {
+      const result = await pornhub.videos.newest({ page: Math.floor(Math.random() * 3) + 1 });
+      videos = result.videos || [];
+    }
+  } catch (e) {
+    console.error(`Error getting ${source} videos:`, e);
+  }
+  
+  const unposted = videos.filter(v => !postedVideos.includes(v.videoId));
+  return unposted.length > 0 ? unposted[0] : null;
+}
+
+async function postVideoToChannel() {
+  if (!CHANNEL_ID) {
+    console.log("CHANNEL_ID not set, skipping auto-post");
+    return;
+  }
+  
+  console.log("Starting auto-post to channel...");
+  
+  let video = null;
+  let source = "";
+  
+  const postedVideos = loadPostedVideos();
+  const candidates = [];
+  
+  for (const src of ["popular", "newest", "popular", "newest"]) {
+    const v = await getUnpostedVideo(src);
+    if (v) {
+      candidates.push({ video: v, source: src });
+    }
+  }
+  
+  if (candidates.length > 0) {
+    const randomIdx = Math.floor(Math.random() * candidates.length);
+    video = candidates[randomIdx].video;
+    source = candidates[randomIdx].source;
+  }
+  
+  if (!video) {
+    console.log("No unposted videos from popular/new, trying random category...");
+    
+    const categories = getDefaultCategories().filter(c => 
+      !EXCLUDED_CATEGORIES.some(ex => c.slug.includes(ex) || c.name.toLowerCase().includes(ex))
+    );
+    
+    const randomCategory = categories[Math.floor(Math.random() * categories.length)];
+    video = await getRandomVideoFromCategory(randomCategory.slug);
+    source = `category: ${randomCategory.name}`;
+  }
+  
+  if (!video) {
+    console.log("No video found for posting");
+    return;
+  }
+  
+  try {
+    const details = await pornhub.videos.details({ url: video.url });
+    
+    if (!filterVideoByCategories(details)) {
+      console.log("Video filtered by category, skipping...");
+      return;
+    }
+    
+    const title = details.title || "Без названия";
+    const duration = details.duration || "Неизвестно";
+    const views = details.watchCount ? formatNumber(details.watchCount) : "Неизвестно";
+    const url = details.url;
+    
+    const text = 
+      `🔥 <b>${escapeHtml(title)}</b>\n\n` +
+      `⏱ ${duration} | 👁 ${views}\n\n` +
+      `🔗 <a href="${url}">Смотреть на Pornhub</a>`;
+    
+    const keyboard = new InlineKeyboard()
+      .url("🎬 Смотреть", url)
+      .row()
+      .text("📥 Скачать", `download_${details.videoId}`);
+    
+    const thumbnail = details.thumbnailUrls?.[0] || details.files?.thumb;
+    
+    if (thumbnail) {
+      try {
+        await bot.api.sendPhoto(CHANNEL_ID, thumbnail, {
+          caption: text,
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      } catch (e) {
+        console.error("Photo error, sending text:", e);
+        await bot.api.sendMessage(CHANNEL_ID, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      }
+    } else {
+      await bot.api.sendMessage(CHANNEL_ID, text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    }
+    
+    postedVideos.push(details.videoId);
+    savePostedVideos(postedVideos);
+    
+    console.log(`Posted video to channel: ${title} (source: ${source})`);
+    
+  } catch (e) {
+    console.error("Error posting video:", e);
+  }
+}
+
+bot.command("post", async (ctx) => {
+  if (!CHANNEL_ID) {
+    await ctx.reply("CHANNEL_ID не настроен");
+    return;
+  }
+  
+  await ctx.reply("Публикую видео в канал...");
+  await postVideoToChannel();
+  await ctx.reply("Готово!");
+});
+
+bot.command("setchannel", async (ctx) => {
+  const chatId = ctx.message?.text?.split(" ")[1];
+  if (!chatId) {
+    await ctx.reply("Использование: /setchannel @channelname или /setchannel -1001234567890");
+    return;
+  }
+  
+  await ctx.reply(`Канал установлен: ${chatId}\nДобавьте этот ID в .env как CHANNEL_ID`);
+});
+
 bot.start();
 console.log("Bot started!");
+
+if (CHANNEL_ID) {
+  console.log(`Auto-posting enabled to channel: ${CHANNEL_ID}`);
+  
+  setTimeout(() => {
+    postVideoToChannel();
+  }, 5000);
+  
+  setInterval(() => {
+    postVideoToChannel();
+  }, 60 * 60 * 1000);
+  
+  setInterval(() => {
+    const posted = loadPostedVideos();
+    console.log(`Posted videos count: ${posted.length}`);
+  }, 10 * 60 * 1000);
+}

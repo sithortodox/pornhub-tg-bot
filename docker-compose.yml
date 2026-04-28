@@ -5,3 +5,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - pornhub-data:/app/data
+
+volumes:
+  pornhub-data:
