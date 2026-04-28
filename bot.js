@@ -770,7 +770,22 @@ async function postVideoToChannel() {
     const videoId = details.videoId;
     
     const files = details.files || {};
-    const videoUrl = files.low || files.high || files.HLS;
+    console.log("Available files:", JSON.stringify(files).substring(0, 500));
+    
+    let videoUrl = files.low || files.high;
+    
+    if (videoUrl && videoUrl.startsWith("//")) {
+      videoUrl = "https:" + videoUrl;
+    }
+    
+    if (!videoUrl && files.HLS) {
+      videoUrl = files.HLS;
+      if (videoUrl.startsWith("//")) {
+        videoUrl = "https:" + videoUrl;
+      }
+    }
+    
+    console.log(`Video URL: ${videoUrl?.substring(0, 100)}`);
     
     if (!videoUrl) {
       console.log("No video URL found, posting as link...");
@@ -788,11 +803,18 @@ async function postVideoToChannel() {
         method: "get",
         url: videoUrl,
         responseType: "stream",
+        timeout: 120000,
+        maxRedirects: 5,
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Referer": "https://www.pornhub.com/"
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "*/*",
+          "Accept-Encoding": "identity",
+          "Referer": "https://www.pornhub.com/",
+          "Origin": "https://www.pornhub.com"
         }
       });
+      
+      console.log(`Response status: ${response.status}, Content-Length: ${response.headers['content-length']}`);
       
       const writer = createWriteStream(inputFile);
       response.data.pipe(writer);
@@ -806,6 +828,13 @@ async function postVideoToChannel() {
       const sizeMB = stats.size / (1024 * 1024);
       
       console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
+      
+      if (sizeMB < 0.1) {
+        console.log("File too small, posting as link...");
+        cleanup([inputFile]);
+        await postAsLink(CHANNEL_ID, details, postedVideos, source);
+        return;
+      }
       
       let fileToSend = inputFile;
       
