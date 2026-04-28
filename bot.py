@@ -41,10 +41,22 @@ def get_main_keyboard():
     return kb
 
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.pornhub.com/",
+}
+
+
 async def fetch(endpoint: str, params: dict = None) -> dict:
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         url = f"{BASE_URL}{endpoint}"
         async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error(f"API error {resp.status}: {url} - {text[:200]}")
+                return {}
             return await resp.json()
 
 
