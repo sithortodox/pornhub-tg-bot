@@ -1,42 +1,34 @@
 # Pornhub Telegram Bot
 
-Телеграм-бот для поиска контента с Pornhub используя [pornhub-api](https://github.com/Derfirm/pornhub-api)
+Телеграм-бот для поиска контента с Pornhub используя [pornhub](https://github.com/rodrigogs/pornhub) библиотеку
 
 ## Функционал
 
 - **Поиск видео** - поиск по ключевым словам
-- **Популярные видео** - просмотр трендовых видео
-- **Категории** - просмотр видео по категориям
-- **Теги** - поиск видео по тегам
-- **Порнозвёзды** - просмотр видео с конкретными актёрами
-- **По ID видео** - получение информации о конкретном видео
+- **Популярные видео** - просмотр самых просматриваемых видео
+- **Новые видео** - просмотр новых видео
+- **Рекомендуемые** - рекомендуемые видео
+- **По ссылке** - получение подробной информации о видео по ссылке
 
 ## Установка
 
 1. Клонируйте репозиторий:
 ```bash
-cd pornhub-telegram-bot
+git clone https://github.com/sithortodox/pornhub-tg-bot.git
+cd pornhub-tg-bot
 ```
 
-2. Создайте виртуальное окружение:
+2. Установите зависимости:
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# или
-venv\Scripts\activate  # Windows
+npm install
 ```
 
-3. Установите зависимости:
-```bash
-pip install -r requirements.txt
-```
-
-4. Создайте файл `.env`:
+3. Создайте файл `.env`:
 ```bash
 cp .env.example .env
 ```
 
-5. Получите токен бота от [@BotFather](https://t.me/BotFather) и добавьте его в `.env`:
+4. Получите токен бота от [@BotFather](https://t.me/BotFather) и добавьте его в `.env`:
 ```
 BOT_TOKEN=your_bot_token
 ```
@@ -45,19 +37,19 @@ BOT_TOKEN=your_bot_token
 
 ### Обычный запуск
 ```bash
-python bot.py
+npm start
 ```
 
 ### Docker
 ```bash
 # Сборка и запуск
-docker-compose up -d
+docker compose up -d
 
 # Просмотр логов
-docker-compose logs -f
+docker compose logs -f
 
 # Остановка
-docker-compose down
+docker compose down
 ```
 
 ## Команды бота
@@ -65,6 +57,5 @@ docker-compose down
 - `/start` - Главное меню
 - `/search` - Поиск видео
 - `/popular` - Популярные видео
-- `/categories` - Категории
-- `/stars` - Порнозвёзды
+- `/newest` - Новые видео
 - `/help` - Помощь

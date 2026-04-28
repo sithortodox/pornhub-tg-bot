@@ -1,10 +1,6 @@
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-venv
+node_modules
+npm-debug.log
+.git
+.gitignore
 .env
-.idea
-.vscode
-*.log
+*.md

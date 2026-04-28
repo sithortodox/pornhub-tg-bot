@@ -1,0 +1,13 @@
+{
+  "name": "pornhub-telegram-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "pornhub": "^0.1.0"
+  }
+}
