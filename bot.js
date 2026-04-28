@@ -595,6 +595,8 @@ function compressVideo(input, output) {
 function downloadHLS(hlsUrl, output) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn("ffmpeg", [
+      "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "-headers", "Referer: https://www.pornhub.com/\r\n",
       "-i", hlsUrl,
       "-y",
       "-c", "copy",
@@ -602,6 +604,10 @@ function downloadHLS(hlsUrl, output) {
       "-movflags", "+faststart",
       output
     ]);
+    
+    ffmpeg.stderr.on("data", (data) => {
+      console.log("ffmpeg stderr:", data.toString().substring(0, 200));
+    });
     
     ffmpeg.on("close", (code) => {
       if (code === 0) {
@@ -959,11 +965,39 @@ async function postAsLink(channelId, details, postedVideos, source) {
   
   try {
     if (thumbnail) {
-      await bot.api.sendPhoto(channelId, thumbnail, {
-        caption: text,
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      });
+      try {
+        const thumbResp = await axios({
+          method: "get",
+          url: thumbnail,
+          responseType: "arraybuffer",
+          timeout: 30000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.pornhub.com/"
+          }
+        });
+        
+        if (thumbResp.data && thumbResp.data.byteLength > 1000) {
+          const thumbFile = join(TMP_DIR, `${details.videoId}_thumb.jpg`);
+          require("fs").writeFileSync(thumbFile, Buffer.from(thumbResp.data));
+          
+          await bot.api.sendPhoto(channelId, new InputFile(thumbFile), {
+            caption: text,
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          });
+          
+          cleanup([thumbFile]);
+        } else {
+          throw new Error("Thumbnail too small");
+        }
+      } catch (thumbError) {
+        console.log("Thumbnail download failed, sending text only");
+        await bot.api.sendMessage(channelId, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      }
     } else {
       await bot.api.sendMessage(channelId, text, {
         parse_mode: "HTML",
