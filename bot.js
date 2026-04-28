@@ -619,10 +619,6 @@ function downloadHLS(hlsUrl, output) {
     }, 180000);
   });
 }
-    
-    ffmpeg.on("error", reject);
-  });
-}
 
 function cleanup(files) {
   for (const file of files) {
