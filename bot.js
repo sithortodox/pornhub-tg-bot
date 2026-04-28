@@ -934,12 +934,6 @@ async function postVideoToChannel() {
       
       console.log(`Posted video to channel: ${title} (${finalSizeMB.toFixed(1)} MB, source: ${source})`);
       
-    } catch (downloadError) {
-      console.error("Download error:", downloadError);
-      cleanup([inputFile, compressedFile]);
-      await postAsLink(CHANNEL_ID, details, postedVideos, source);
-    }
-    
   } catch (e) {
     console.error("Error posting video:", e);
   }
