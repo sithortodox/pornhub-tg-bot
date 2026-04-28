@@ -1,7 +1,16 @@
-import { Bot, session, InlineKeyboard } from "grammy";
+import { Bot, session, InlineKeyboard, InputFile } from "grammy";
 import pornhub from "pornhub";
 import { load } from "cheerio";
 import axios from "axios";
+import { spawn } from "child_process";
+import { createWriteStream, existsSync, statSync, unlinkSync, mkdirSync, createReadStream } from "fs";
+import { tmpdir } from "os";
+import { join, dirname } from "path";
+
+const TMP_DIR = join(tmpdir(), "pornhub-bot");
+if (!existsSync(TMP_DIR)) {
+  mkdirSync(TMP_DIR, { recursive: true });
+}
 
 const TOKEN = process.env.BOT_TOKEN;
 const bot = new Bot(TOKEN);
@@ -421,47 +430,140 @@ bot.callbackQuery(/^download_/, async (ctx) => {
   const videoId = ctx.callbackQuery.data.slice(9);
   
   try {
-    await ctx.answerCallbackQuery({ text: "Получаю ссылки на скачивание...", show_alert: false });
+    await ctx.answerCallbackQuery({ text: "Скачиваю видео...", show_alert: false });
+    await ctx.reply("⏳ Скачиваю видео, подождите...");
     
     const video = await pornhub.videos.details({ 
       url: `https://www.pornhub.com/view_video.php?viewkey=${videoId}` 
     });
     
     const files = video.files || {};
-    const links = [];
+    const videoUrl = files.low || files.high || files.HLS;
     
-    if (files.high) {
-      links.push(`📥 <b>Высокое качество (720p+):</b>\n${files.high}`);
-    }
-    if (files.low) {
-      links.push(`📥 <b>Среднее качество:</b>\n${files.low}`);
-    }
-    if (files.HLS) {
-      links.push(`📥 <b>HLS (стриминг):</b>\n${files.HLS}`);
-    }
-    
-    if (links.length > 0) {
+    if (!videoUrl) {
       await ctx.reply(
-        `<b>Ссылки для скачивания:</b>\n\n${links.join("\n\n")}\n\n` +
-        `<i>💡 Скопируйте ссылку и вставьте в браузер для скачивания</i>`,
-        { parse_mode: "HTML" }
-      );
-    } else {
-      await ctx.reply(
-        "Не удалось получить прямые ссылки.\n\n" +
+        "Не удалось получить видео.\n\n" +
         "Попробуйте скачать через онлайн-сервис:\n" +
-        `https://www.y2mate.com/pornhub?url=${encodeURIComponent(video.url)}`
+        `https://www.p2mp4.com/video/${videoId}`
       );
+      return;
     }
+    
+    const title = video.title || `video_${videoId}`;
+    const safeTitle = title.replace(/[^a-zA-Z0-9а-яА-Я\s]/g, "").substring(0, 50);
+    const inputFile = join(TMP_DIR, `${videoId}.mp4`);
+    const compressedFile = join(TMP_DIR, `${videoId}_compressed.mp4`);
+    
+    console.log(`Downloading video: ${videoId}`);
+    
+    const response = await axios({
+      method: "get",
+      url: videoUrl,
+      responseType: "stream",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.pornhub.com/"
+      }
+    });
+    
+    const writer = createWriteStream(inputFile);
+    response.data.pipe(writer);
+    
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
+    
+    const stats = statSync(inputFile);
+    const sizeMB = stats.size / (1024 * 1024);
+    
+    console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
+    
+    let fileToSend = inputFile;
+    
+    if (sizeMB > 48) {
+      await ctx.reply(`📦 Видео ${sizeMB.toFixed(1)} MB, сжимаю до 50MB...`);
+      
+      await compressVideo(inputFile, compressedFile);
+      
+      if (existsSync(compressedFile)) {
+        const compressedStats = statSync(compressedFile);
+        const compressedSizeMB = compressedStats.size / (1024 * 1024);
+        
+        console.log(`Compressed: ${compressedSizeMB.toFixed(2)} MB`);
+        
+        if (compressedSizeMB < 48) {
+          fileToSend = compressedFile;
+        } else {
+          await ctx.reply(
+            `⚠️ Видео слишком большое (${sizeMB.toFixed(1)} MB).\n\n` +
+            `Telegram ограничивает размер файлов до 50MB.\n\n` +
+            `Скачайте напрямую:\n${videoUrl}`
+          );
+          cleanup([inputFile, compressedFile]);
+          return;
+        }
+      }
+    }
+    
+    const finalStats = statSync(fileToSend);
+    const finalSizeMB = finalStats.size / (1024 * 1024);
+    
+    await ctx.replyWithVideo(new InputFile(fileToSend), {
+      caption: `🎬 ${safeTitle}\n\n📦 Размер: ${finalSizeMB.toFixed(1)} MB`,
+      supports_streaming: true
+    });
+    
+    cleanup([inputFile, compressedFile]);
+    
   } catch (error) {
     console.error("Download error:", error);
     await ctx.reply(
-      "Ошибка при получении ссылок.\n\n" +
+      `❌ Ошибка при скачивании: ${error.message}\n\n` +
       "Попробуйте скачать через онлайн-сервис:\n" +
       `https://www.p2mp4.com/video/${videoId}`
     );
   }
 });
+
+function compressVideo(input, output) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn("ffmpeg", [
+      "-i", input,
+      "-y",
+      "-c:v", "libx264",
+      "-preset", "fast",
+      "-crf", "28",
+      "-c:a", "aac",
+      "-b:a", "96k",
+      "-fs", "48M",
+      "-movflags", "+faststart",
+      output
+    ]);
+    
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+    
+    ffmpeg.on("error", reject);
+  });
+}
+
+function cleanup(files) {
+  for (const file of files) {
+    try {
+      if (existsSync(file)) {
+        unlinkSync(file);
+      }
+    } catch (e) {
+      console.error("Cleanup error:", e);
+    }
+  }
+}
 
 async function sendVideoDetails(ctx, video) {
   const title = video.title || "Без названия";
