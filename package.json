@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "grammy": "^1.30.0",
-    "pornhub": "^0.1.0"
+    "pornhub": "^0.1.0",
+    "cheerio": "^1.0.0",
+    "axios": "^1.6.0"
   }
 }
