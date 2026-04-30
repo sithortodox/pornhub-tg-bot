@@ -1375,9 +1375,12 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId, videoU
     .text(`👎 0`, `dislike_${messageId}`);
   
   try {
-    // For files > 50MB, try sending via URL (Telegram will download it)
-    if (sizeMB > 50 && videoUrl) {
-      console.log("Large file, sending via URL...");
+    // Check if videoUrl is a direct video link (not get_media endpoint)
+    const isDirectVideoUrl = videoUrl && !videoUrl.includes('get_media') && !videoUrl.includes('.m3u8');
+    
+    // For files > 50MB with direct video URL, let Telegram download it
+    if (sizeMB > 50 && isDirectVideoUrl) {
+      console.log("Large file, sending via direct URL...");
       const result = await bot.api.sendVideo(chatId, videoUrl, {
         caption: caption,
         parse_mode: "HTML",
@@ -1388,7 +1391,30 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId, videoU
       return { ok: true, result };
     }
     
+    // For Local Bot API with files > 50MB, use file:// URL scheme
+    if (sizeMB > 50 && BOT_API_URL) {
+      console.log("Large file, sending via file:// URL to Local Bot API...");
+      
+      const form = new FormData();
+      form.append("chat_id", chatId);
+      form.append("video", `file://${filePath}`);
+      form.append("caption", caption);
+      form.append("parse_mode", "HTML");
+      form.append("supports_streaming", "true");
+      form.append("reply_markup", JSON.stringify(keyboard));
+      
+      const url = `${BOT_API_URL}/bot${BOT_TOKEN}/sendVideo`;
+      const response = await axios.post(url, form, {
+        headers: form.getHeaders(),
+        timeout: 600000,
+      });
+      
+      console.log("Video sent via file:// URL:", response.data.ok);
+      return response.data;
+    }
+    
     // For smaller files, use InputFile
+    console.log("Sending via InputFile...");
     const result = await bot.api.sendVideo(chatId, new InputFile(filePath), {
       caption: caption,
       parse_mode: "HTML",
