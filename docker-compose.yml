@@ -15,11 +15,8 @@ services:
   bot:
     build: .
     container_name: pornhub-bot
-    environment:
-      - BOT_TOKEN=8690426687:AAHEWV3QkZZRORMaUK9tgzAzidn9aNtN4Jg
-      - CHANNEL_ID=-1003764956510
-      - BOT_API_URL=http://bot-api:8081
-      - ADMIN_ID=198041244
+    env_file:
+      - .env
     volumes:
       - pornhub-data:/app/data
     depends_on:
