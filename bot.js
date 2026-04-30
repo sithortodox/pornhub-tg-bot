@@ -1455,6 +1455,13 @@ async function postVideoToChannel() {
     const files = details.files || {};
     console.log("Available files:", JSON.stringify(files).substring(0, 500));
     
+    // Check if video has downloadable files
+    const hasFiles = files && (files.low || files.high || files.HLS);
+    if (!hasFiles) {
+      console.log("Video has no downloadable files (premium/private/deleted), skipping...");
+      return;
+    }
+    
     let hlsUrl = files.HLS;
     if (hlsUrl && hlsUrl.startsWith("//")) {
       hlsUrl = "https:" + hlsUrl;
