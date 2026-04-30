@@ -1373,21 +1373,41 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
     .text(`👍 0`, `like_${messageId}`)
     .text(`👎 0`, `dislike_${messageId}`);
   
+  const stats = statSync(filePath);
+  const sizeMB = stats.size / (1024 * 1024);
+  console.log(`Sending video to channel: ${sizeMB.toFixed(1)} MB`);
+  
   const form = new FormData();
   form.append("chat_id", chatId);
-  form.append("video", createReadStream(filePath));
+  
+  // Use file:// prefix for Local Bot API with local files
+  const videoPath = `file://${filePath}`;
+  form.append("video", videoPath);
   form.append("caption", caption);
   form.append("parse_mode", "HTML");
   form.append("supports_streaming", "true");
   form.append("reply_markup", JSON.stringify(keyboard));
   
-  const response = await axios.post(url, form, {
-    headers: form.getHeaders(),
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
-  
-  return response.data;
+  try {
+    const response = await axios.post(url, form, {
+      headers: {
+        ...form.getHeaders(),
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: 600000,
+    });
+    
+    console.log("Video sent successfully:", response.data.ok);
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      console.log("Send error:", JSON.stringify(error.response.data));
+    } else {
+      console.log("Send error:", error.message);
+    }
+    throw error;
+  }
 }
 
 let isPostingLocked = false;
