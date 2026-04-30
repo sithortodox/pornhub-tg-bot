@@ -1431,6 +1431,8 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId, videoU
 }
 
 let isPostingLocked = false;
+let postingRetryCount = 0;
+const MAX_RETRY = 3;
 
 async function postVideoToChannel() {
   if (isPostingLocked) {
@@ -1567,7 +1569,15 @@ async function postVideoToChannel() {
     }
     
     if (!downloadSuccess) {
-      console.log("All download methods failed");
+      console.log("All download methods failed, trying next video...");
+      postingRetryCount++;
+      if (postingRetryCount < MAX_RETRY) {
+        console.log(`Retry ${postingRetryCount}/${MAX_RETRY} in 5 seconds...`);
+        setTimeout(() => postVideoToChannel(), 5000);
+      } else {
+        console.log(`Max retries (${MAX_RETRY}) reached, waiting for next interval`);
+        postingRetryCount = 0;
+      }
       return;
     }
     
@@ -1618,6 +1628,7 @@ async function postVideoToChannel() {
       savePostedVideos(postedVideos);
       
       console.log(`Posted video to channel: ${title} (${sizeMB.toFixed(1)} MB, source: ${source})`);
+      postingRetryCount = 0; // Reset retry counter on success
     } catch (sendErr) {
       console.error("Send error:", sendErr.response?.data || sendErr.message);
       cleanup([finalFile]);
