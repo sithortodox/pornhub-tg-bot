@@ -48,7 +48,7 @@ function loadSettings() {
   return {
     autoPostEnabled: true,
     interval: 30,
-    watermarkEnabled: true,
+    watermarkEnabled: false,
     maxVideoSize: 500,
     sourcePreference: "mixed"
   };
