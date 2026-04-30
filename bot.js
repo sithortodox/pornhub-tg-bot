@@ -6,7 +6,7 @@ import axios from "axios";
 import FormData from "form-data";
 import { fileURLToPath } from "url";
 import { createHash } from "crypto";
-import pornhub from "pornhub.js";
+import pornhub from "pornhub";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
