@@ -1379,10 +1379,7 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
   
   const form = new FormData();
   form.append("chat_id", chatId);
-  
-  // Use file:// prefix for Local Bot API with local files
-  const videoPath = `file://${filePath}`;
-  form.append("video", videoPath);
+  form.append("video", createReadStream(filePath));
   form.append("caption", caption);
   form.append("parse_mode", "HTML");
   form.append("supports_streaming", "true");
