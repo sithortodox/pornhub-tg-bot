@@ -1377,9 +1377,10 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
   const sizeMB = stats.size / (1024 * 1024);
   console.log(`Sending video to channel: ${sizeMB.toFixed(1)} MB`);
   
+  // For Local Bot API, send file path as string (file:// scheme)
   const form = new FormData();
   form.append("chat_id", chatId);
-  form.append("video", createReadStream(filePath));
+  form.append("video", filePath); // Local path for Local Bot API
   form.append("caption", caption);
   form.append("parse_mode", "HTML");
   form.append("supports_streaming", "true");
@@ -1390,8 +1391,6 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
       headers: {
         ...form.getHeaders(),
       },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
       timeout: 600000,
     });
     
