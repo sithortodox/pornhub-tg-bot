@@ -1,12 +1,31 @@
 services:
+  bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    environment:
+      - TELEGRAM_API_ID=202487
+      - TELEGRAM_API_HASH=64a9c79af108ff27016cd442399fd860
+      - TELEGRAM_LOCAL=true
+    ports:
+      - "8081:8081"
+    volumes:
+      - bot-api-data:/var/lib/telegram-bot-api
+    restart: unless-stopped
+
   bot:
     build: .
     container_name: pornhub-bot
-    restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - BOT_TOKEN=8690426687:AAHEWV3QkZZRORMaUK9tgzAzidn9aNtN4Jg
+      - CHANNEL_ID=-1003764956510
+      - BOT_API_URL=http://bot-api:8081
+      - ADMIN_ID=198041244
     volumes:
       - pornhub-data:/app/data
+    depends_on:
+      - bot-api
+    restart: unless-stopped
 
 volumes:
+  bot-api-data:
   pornhub-data:

@@ -2,10 +2,11 @@ import { Bot, session, InlineKeyboard, InputFile } from "grammy";
 import pornhub from "pornhub";
 import { load } from "cheerio";
 import axios from "axios";
+import FormData from "form-data";
 import { spawn } from "child_process";
-import { createWriteStream, existsSync, statSync, unlinkSync, mkdirSync, createReadStream, writeFileSync, readFileSync } from "fs";
+import { createWriteStream, createReadStream, existsSync, statSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { tmpdir } from "os";
-import { join, dirname } from "path";
+import { join } from "path";
 
 const TMP_DIR = join(tmpdir(), "pornhub-bot");
 if (!existsSync(TMP_DIR)) {
@@ -18,13 +19,51 @@ if (!existsSync(DATA_DIR)) {
 }
 
 const POSTED_VIDEOS_FILE = join(DATA_DIR, "posted_videos.json");
+const POST_STATS_FILE = join(DATA_DIR, "post_stats.json");
+const SUBMISSIONS_FILE = join(DATA_DIR, "submissions.json");
+const SUBSCRIBERS_FILE = join(DATA_DIR, "subscribers.json");
+const SETTINGS_FILE = join(DATA_DIR, "settings.json");
 const CHANNEL_ID = process.env.CHANNEL_ID;
+const BOT_API_URL = process.env.BOT_API_URL;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = parseInt(process.env.ADMIN_ID || "0");
+
+const WATERMARK_TEXT = "PornHub на ладони";
+const CHANNEL_USERNAME = "@pornhub_on_your_palm";
+
+function loadSettings() {
+  if (existsSync(SETTINGS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(SETTINGS_FILE, "utf8"));
+    } catch (e) {
+      return {
+        autoPostEnabled: true,
+        interval: 30,
+        watermarkEnabled: true,
+        maxVideoSize: 500,
+        sourcePreference: "mixed"
+      };
+    }
+  }
+  return {
+    autoPostEnabled: true,
+    interval: 30,
+    watermarkEnabled: true,
+    maxVideoSize: 500,
+    sourcePreference: "mixed"
+  };
+}
+
+function saveSettings(settings) {
+  writeFileSync(SETTINGS_FILE, JSON.stringify(settings));
+}
+
+const settings = loadSettings();
 
 function loadPostedVideos() {
   if (existsSync(POSTED_VIDEOS_FILE)) {
     try {
-      const data = readFileSync(POSTED_VIDEOS_FILE, "utf8");
-      return JSON.parse(data);
+      return JSON.parse(readFileSync(POSTED_VIDEOS_FILE, "utf8"));
     } catch (e) {
       return [];
     }
@@ -36,8 +75,64 @@ function savePostedVideos(videos) {
   writeFileSync(POSTED_VIDEOS_FILE, JSON.stringify(videos.slice(-1000)));
 }
 
-const TOKEN = process.env.BOT_TOKEN;
-const bot = new Bot(TOKEN);
+function loadPostStats() {
+  if (existsSync(POST_STATS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(POST_STATS_FILE, "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function savePostStats(stats) {
+  writeFileSync(POST_STATS_FILE, JSON.stringify(stats));
+}
+
+function loadSubmissions() {
+  if (existsSync(SUBMISSIONS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(SUBMISSIONS_FILE, "utf8"));
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveSubmissions(submissions) {
+  writeFileSync(SUBMISSIONS_FILE, JSON.stringify(submissions.slice(-100)));
+}
+
+function loadSubscribers() {
+  if (existsSync(SUBSCRIBERS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(SUBSCRIBERS_FILE, "utf8"));
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveSubscribers(subscribers) {
+  writeFileSync(SUBSCRIBERS_FILE, JSON.stringify([...new Set(subscribers)]));
+}
+
+const bot = new Bot(BOT_TOKEN, {
+  client: BOT_API_URL ? { apiUrl: BOT_API_URL } : undefined
+});
+
+console.log("Using Bot API URL:", BOT_API_URL || "https://api.telegram.org");
+
+bot.catch((err) => {
+  console.error("Bot error:", err);
+});
+
+bot.on("channel_post", async (ctx) => {
+  return;
+});
 
 const CATEGORIES_CACHE = { data: null, timestamp: 0 };
 
@@ -58,15 +153,15 @@ function filterVideoByCategories(video) {
 
 bot.use(
   session({
-    initial: () => ({ state: null }),
+    initial: () => ({ state: null, adminPage: 0 }),
   })
 );
 
 const mainKeyboard = {
   keyboard: [
-    [{ text: "Поиск видео" }, { text: "Популярные" }],
-    [{ text: "Категории" }, { text: "Новые" }],
-    [{ text: "По ссылке" }],
+    [{ text: "Search videos" }, { text: "Popular" }],
+    [{ text: "Categories" }, { text: "New" }],
+    [{ text: "Submit video" }, { text: "Top videos" }],
   ],
   resize_keyboard: true,
 };
@@ -137,7 +232,6 @@ function getDefaultCategories() {
     { name: "Fetish", slug: "fetish" },
     { name: "Fisting", slug: "fisting" },
     { name: "Gangbang", slug: "gangbang" },
-    { name: "Gay", slug: "gay" },
     { name: "German", slug: "german" },
     { name: "Group", slug: "group" },
     { name: "Handjob", slug: "handjob" },
@@ -166,50 +260,499 @@ function getDefaultCategories() {
     { name: "Striptease", slug: "striptease" },
     { name: "Teen", slug: "teen" },
     { name: "Threesome", slug: "threesome" },
-    { name: "Transgender", slug: "transgender" },
     { name: "Vintage", slug: "vintage" },
     { name: "Webcam", slug: "webcam" },
   ];
 }
 
+function isAdmin(ctx) {
+  return ctx.from?.id === ADMIN_ID;
+}
+
+async function showAdminPanel(ctx) {
+  if (!isAdmin(ctx)) {
+    await ctx.reply("Admin only.");
+    return;
+  }
+  
+  const stats = loadPostStats();
+  const postedVideos = loadPostedVideos();
+  const subscribers = loadSubscribers();
+  const submissions = loadSubmissions();
+  const settings = loadSettings();
+  
+  let totalLikes = 0;
+  let totalDislikes = 0;
+  
+  for (const msgId in stats) {
+    totalLikes += stats[msgId].likes || 0;
+    totalDislikes += stats[msgId].dislikes || 0;
+  }
+  
+  const rating = totalLikes + totalDislikes > 0 
+    ? ((totalLikes / (totalLikes + totalDislikes)) * 100).toFixed(1) 
+    : 0;
+  
+  const statusEmoji = settings.autoPostEnabled ? "✅" : "❌";
+  const watermarkEmoji = settings.watermarkEnabled ? "✅" : "❌";
+  
+  const text = `🎛 <b>Admin Panel</b>
+
+📊 <b>Statistics</b>
+├ 📤 Posts: ${postedVideos.length}
+├ 👥 Subscribers: ${subscribers.length}
+├ 📝 Submissions: ${submissions.length}
+├ 👍 Likes: ${totalLikes}
+├ 👎 Dislikes: ${totalDislikes}
+└ ⭐ Rating: ${rating}%
+
+⚙️ <b>Settings</b>
+├ 📢 Auto-post: ${statusEmoji}
+├ ⏱ Interval: ${settings.interval} min
+├ 🏷 Watermark: ${watermarkEmoji}
+└ 📦 Max size: ${settings.maxVideoSize} MB`;
+
+  const keyboard = new InlineKeyboard()
+    .text(`${settings.autoPostEnabled ? "⏸ Stop" : "▶️ Start"} Auto`, "admin_toggle_auto")
+    .row()
+    .text("⏱ -5min", "admin_interval_-5")
+    .text(`${settings.interval} min`, "admin_noop")
+    .text("⏱ +5min", "admin_interval_+5")
+    .row()
+    .text("📝 Submissions", "admin_submissions")
+    .text("👥 Subscribers", "admin_subscribers")
+    .row()
+    .text("🏆 Top Videos", "admin_top")
+    .text("📊 Analytics", "admin_analytics")
+    .row()
+    .text("🏷 Watermark", "admin_toggle_watermark")
+    .text("🔄 Post Now", "admin_post_now")
+    .row()
+    .text("📢 Broadcast", "admin_broadcast")
+    .text("🗑 Clear Data", "admin_clear");
+
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  }
+}
+
+bot.callbackQuery(/^admin_/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery({ text: "Admin only." });
+    return;
+  }
+  
+  const action = ctx.callbackQuery.data.slice(6);
+  const settings = loadSettings();
+  
+  if (action === "toggle_auto") {
+    settings.autoPostEnabled = !settings.autoPostEnabled;
+    saveSettings(settings);
+    await ctx.answerCallbackQuery({ text: settings.autoPostEnabled ? "Auto-post enabled" : "Auto-post disabled" });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "toggle_watermark") {
+    settings.watermarkEnabled = !settings.watermarkEnabled;
+    saveSettings(settings);
+    await ctx.answerCallbackQuery({ text: settings.watermarkEnabled ? "Watermark enabled" : "Watermark disabled" });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "interval_-5") {
+    settings.interval = Math.max(5, settings.interval - 5);
+    saveSettings(settings);
+    await ctx.answerCallbackQuery({ text: `Interval: ${settings.interval} min` });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "interval_+5") {
+    settings.interval = Math.min(120, settings.interval + 5);
+    saveSettings(settings);
+    await ctx.answerCallbackQuery({ text: `Interval: ${settings.interval} min` });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "submissions") {
+    const submissions = loadSubmissions();
+    if (submissions.length === 0) {
+      await ctx.answerCallbackQuery({ text: "No submissions", show_alert: true });
+      return;
+    }
+    
+    let msg = "📝 <b>Submitted Videos</b>\n\n";
+    submissions.slice(-10).forEach((s, i) => {
+      msg += `${i + 1}. ${s.title?.substring(0, 35) || "No title"}...\n`;
+      msg += `   by: @${s.username || "anonymous"}\n`;
+      msg += `   ${s.url}\n\n`;
+    });
+    
+    const keyboard = new InlineKeyboard()
+      .text("✅ Approve All", "admin_approve_all")
+      .text("🗑 Clear", "admin_clear_submissions")
+      .row()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "subscribers") {
+    const subscribers = loadSubscribers();
+    let msg = `👥 <b>Subscribers: ${subscribers.length}</b>\n\n`;
+    
+    if (subscribers.length > 0) {
+      msg += "Recent subscribers:\n";
+      subscribers.slice(-10).forEach((id, i) => {
+        msg += `${i + 1}. ID: ${id}\n`;
+      });
+    }
+    
+    const keyboard = new InlineKeyboard()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "top") {
+    const stats = loadPostStats();
+    const topVideos = [];
+    
+    for (const msgId in stats) {
+      if (stats[msgId].title) {
+        topVideos.push({
+          title: stats[msgId].title,
+          likes: stats[msgId].likes || 0,
+          dislikes: stats[msgId].dislikes || 0,
+        });
+      }
+    }
+    
+    if (topVideos.length === 0) {
+      await ctx.answerCallbackQuery({ text: "No data yet", show_alert: true });
+      return;
+    }
+    
+    topVideos.sort((a, b) => b.likes - a.likes);
+    
+    let msg = "🏆 <b>Top-10 Videos</b>\n\n";
+    topVideos.slice(0, 10).forEach((v, i) => {
+      const ratio = v.likes + v.dislikes > 0 
+        ? ((v.likes / (v.likes + v.dislikes)) * 100).toFixed(0) 
+        : 0;
+      msg += `${i + 1}. ${v.title.substring(0, 30)}...\n`;
+      msg += `   👍 ${v.likes} | 👎 ${v.dislikes} | ⭐ ${ratio}%\n\n`;
+    });
+    
+    const keyboard = new InlineKeyboard()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "analytics") {
+    const stats = loadPostStats();
+    const postedVideos = loadPostedVideos();
+    const subscribers = loadSubscribers();
+    const submissions = loadSubmissions();
+    
+    let totalLikes = 0;
+    let totalDislikes = 0;
+    
+    for (const msgId in stats) {
+      totalLikes += stats[msgId].likes || 0;
+      totalDislikes += stats[msgId].dislikes || 0;
+    }
+    
+    const avgLikes = postedVideos.length > 0 ? (totalLikes / postedVideos.length).toFixed(1) : 0;
+    
+    let msg = `📊 <b>Detailed Analytics</b>\n\n`;
+    msg += `<b>Content</b>\n`;
+    msg += `├ Total posts: ${postedVideos.length}\n`;
+    msg += `├ Submissions pending: ${submissions.length}\n`;
+    msg += `└ Posts this week: ~${Math.min(postedVideos.length, 7 * (60 / settings.interval))}\n\n`;
+    msg += `<b>Engagement</b>\n`;
+    msg += `├ Total reactions: ${totalLikes + totalDislikes}\n`;
+    msg += `├ 👍 Likes: ${totalLikes}\n`;
+    msg += `├ 👎 Dislikes: ${totalDislikes}\n`;
+    msg += `├ Avg likes/post: ${avgLikes}\n`;
+    msg += `└ Approval rate: ${totalLikes + totalDislikes > 0 ? ((totalLikes / (totalLikes + totalDislikes)) * 100).toFixed(1) : 0}%\n\n`;
+    msg += `<b>Audience</b>\n`;
+    msg += `└ Newsletter subs: ${subscribers.length}`;
+    
+    const keyboard = new InlineKeyboard()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "post_now") {
+    await ctx.answerCallbackQuery({ text: "Posting video..." });
+    await postVideoToChannel();
+    await ctx.answerCallbackQuery({ text: "Video posted!", show_alert: true });
+    return;
+  }
+  
+  if (action === "broadcast") {
+    ctx.session.state = "admin_broadcast";
+    await ctx.editMessageText("📢 <b>Broadcast</b>\n\nEnter message to send to all subscribers:", { parse_mode: "HTML" });
+    return;
+  }
+  
+  if (action === "clear") {
+    const keyboard = new InlineKeyboard()
+      .text("🗑 Clear Posts History", "admin_clear_posts")
+      .row()
+      .text("🗑 Clear Submissions", "admin_clear_submissions")
+      .row()
+      .text("🗑 Clear Subscribers", "admin_clear_subscribers")
+      .row()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText("🗑 <b>Clear Data</b>\n\nSelect what to clear:", { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "clear_posts") {
+    savePostedVideos([]);
+    savePostStats({});
+    await ctx.answerCallbackQuery({ text: "Posts history cleared!" });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "clear_submissions") {
+    saveSubmissions([]);
+    await ctx.answerCallbackQuery({ text: "Submissions cleared!" });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "clear_subscribers_confirm") {
+    saveSubscribers([]);
+    await ctx.answerCallbackQuery({ text: "Subscribers cleared!" });
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "back") {
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (action === "noop") {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+  
+  await ctx.answerCallbackQuery();
+});
+
 bot.command("start", async (ctx) => {
   ctx.session.state = null;
-  await ctx.reply(
-    "Привет! Я бот для поиска контента с Pornhub.\n\n" +
-      "Доступные команды:\n" +
-      "/start - Главное меню\n" +
-      "/search - Поиск видео\n" +
-      "/popular - Популярные видео\n" +
-      "/newest - Новые видео\n" +
-      "/help - Помощь",
-    { reply_markup: mainKeyboard }
-  );
+  
+  if (isAdmin(ctx)) {
+    const keyboard = {
+      keyboard: [
+        [{ text: "🎛 Admin Panel" }],
+        [{ text: "Search videos" }, { text: "Popular" }],
+        [{ text: "Categories" }, { text: "New" }],
+      ],
+      resize_keyboard: true,
+    };
+    
+    await ctx.reply(
+      `Hi! I'm a Pornhub content search bot.\n\n<b>Admin mode enabled</b>`,
+      { parse_mode: "HTML", reply_markup: keyboard }
+    );
+  } else {
+    await ctx.reply(
+      `Hi! I'm a Pornhub content search bot.\n\nAvailable commands:\n/start - Main menu\n/search - Search videos\n/popular - Popular videos\n/newest - New videos\n/submit - Submit your video\n/top - Top videos by likes\n/subscribe - Subscribe to announcements\n/help - Help`,
+      { reply_markup: mainKeyboard }
+    );
+  }
+});
+
+bot.command("admin", async (ctx) => {
+  await showAdminPanel(ctx);
+});
+
+bot.hears("🎛 Admin Panel", async (ctx) => {
+  await showAdminPanel(ctx);
 });
 
 bot.command("help", async (ctx) => {
   ctx.session.state = null;
   await ctx.reply(
-    "Как пользоваться ботом:\n\n" +
-      "1. Поиск видео - введите запрос для поиска\n" +
-      "2. Популярные - просмотр популярных видео\n" +
-      "3. Новые - просмотр новых видео\n" +
-      "4. По ссылке - получить информацию о видео по ссылке"
+    `How to use the bot:\n\n1. Search videos - enter a search query\n2. Popular - view popular videos\n3. New - view new videos\n4. By link - get video info by link\n5. Submit video - send a link for channel publication`
   );
 });
 
-bot.hears("Поиск видео", async (ctx) => {
-  ctx.session.state = "search";
-  await ctx.reply("Введите поисковый запрос:");
+bot.command("analytics", async (ctx) => {
+  const stats = loadPostStats();
+  const postedVideos = loadPostedVideos();
+  const subscribers = loadSubscribers();
+  const submissions = loadSubmissions();
+  
+  let totalLikes = 0;
+  let totalDislikes = 0;
+  const topVideos = [];
+  
+  for (const msgId in stats) {
+    totalLikes += stats[msgId].likes || 0;
+    totalDislikes += stats[msgId].dislikes || 0;
+    
+    if (stats[msgId].title) {
+      topVideos.push({
+        title: stats[msgId].title,
+        likes: stats[msgId].likes || 0,
+        dislikes: stats[msgId].dislikes || 0,
+      });
+    }
+  }
+  
+  topVideos.sort((a, b) => b.likes - a.likes);
+  
+  let msg = `📊 Channel Analytics ${CHANNEL_USERNAME}\n\n`;
+  msg += `📈 Metrics:\n`;
+  msg += `├ 📤 Total posts: ${postedVideos.length}\n`;
+  msg += `├ 👥 Subscribers: ${subscribers.length}\n`;
+  msg += `├ 📝 Submissions: ${submissions.length}\n`;
+  msg += `├ 👍 Likes: ${totalLikes}\n`;
+  msg += `├ 👎 Dislikes: ${totalDislikes}\n`;
+  msg += `└ ⭐ Rating: ${totalLikes > 0 ? ((totalLikes / (totalLikes + totalDislikes)) * 100).toFixed(1) : 0}%\n\n`;
+  
+  if (topVideos.length > 0) {
+    msg += `🏆 Top-3 videos:\n`;
+    topVideos.slice(0, 3).forEach((v, i) => {
+      msg += `${i + 1}. ${v.title.substring(0, 40)}... (${v.likes}👍)\n`;
+    });
+  }
+  
+  await ctx.reply(msg);
 });
 
-bot.hears("Категории", async (ctx) => {
+bot.command("top", async (ctx) => {
+  const stats = loadPostStats();
+  const topVideos = [];
+  
+  for (const msgId in stats) {
+    if (stats[msgId].title) {
+      topVideos.push({
+        msgId,
+        title: stats[msgId].title,
+        likes: stats[msgId].likes || 0,
+        dislikes: stats[msgId].dislikes || 0,
+      });
+    }
+  }
+  
+  if (topVideos.length === 0) {
+    await ctx.reply("No data for top videos yet.");
+    return;
+  }
+  
+  topVideos.sort((a, b) => b.likes - a.likes);
+  
+  let msg = `🏆 Top-10 videos by likes:\n\n`;
+  topVideos.slice(0, 10).forEach((v, i) => {
+    const ratio = v.likes + v.dislikes > 0 ? ((v.likes / (v.likes + v.dislikes)) * 100).toFixed(0) : 0;
+    msg += `${i + 1}. ${v.title.substring(0, 35)}...\n`;
+    msg += `   👍 ${v.likes} | 👎 ${v.dislikes} | ⭐ ${ratio}%\n\n`;
+  });
+  
+  await ctx.reply(msg);
+});
+
+bot.command("submit", async (ctx) => {
+  ctx.session.state = "submit";
+  await ctx.reply("Send a Pornhub video link for channel publication:");
+});
+
+bot.command("subscribe", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  
+  const subscribers = loadSubscribers();
+  if (subscribers.includes(userId)) {
+    await ctx.reply("You're already subscribed!");
+    return;
+  }
+  
+  subscribers.push(userId);
+  saveSubscribers(subscribers);
+  await ctx.reply("Thanks for subscribing! You'll receive announcements.");
+});
+
+bot.command("unsubscribe", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  
+  const subscribers = loadSubscribers();
+  const idx = subscribers.indexOf(userId);
+  if (idx > -1) {
+    subscribers.splice(idx, 1);
+    saveSubscribers(subscribers);
+  }
+  await ctx.reply("You unsubscribed from announcements.");
+});
+
+bot.command("broadcast", async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.reply("Admin only command.");
+    return;
+  }
+  
+  const text = ctx.message?.text?.split(" ").slice(1).join(" ");
+  if (!text) {
+    await ctx.reply("Usage: /broadcast Text message");
+    return;
+  }
+  
+  const subscribers = loadSubscribers();
+  let sent = 0;
+  
+  for (const userId of subscribers) {
+    try {
+      await bot.api.sendMessage(userId, `📢 ${text}`);
+      sent++;
+    } catch (e) {}
+  }
+  
+  await ctx.reply(`Broadcast sent to ${sent}/${subscribers.length} subscribers.`);
+});
+
+bot.hears("Submit video", async (ctx) => {
+  ctx.session.state = "submit";
+  await ctx.reply("Send a Pornhub video link for channel publication:");
+});
+
+bot.hears("Top videos", async (ctx) => {
+  await ctx.triggerCommand("top");
+});
+
+bot.hears("Search videos", async (ctx) => {
+  ctx.session.state = "search";
+  await ctx.reply("Enter search query:");
+});
+
+bot.hears("Categories", async (ctx) => {
   ctx.session.state = null;
   try {
     const categories = await getCategories();
     await showCategoriesPage(ctx, categories, 0);
   } catch (error) {
     console.error("Categories error:", error);
-    await ctx.reply("Ошибка при получении категорий.");
+    await ctx.reply("Error getting categories.");
   }
 });
 
@@ -233,18 +776,18 @@ async function showCategoriesPage(ctx, categories, page) {
   keyboard.row();
   
   if (page > 0) {
-    keyboard.text("◀️ Назад", `catpage_${page - 1}`);
+    keyboard.text("◀️ Back", `catpage_${page - 1}`);
   }
   
   keyboard.text(`${page + 1}/${totalPages}`, "noop");
   
   if (end < categories.length) {
-    keyboard.text("Вперёд ▶️", `catpage_${page + 1}`);
+    keyboard.text("Next ▶️", `catpage_${page + 1}`);
   }
   
   const text = page === 0 && !ctx.callbackQuery
-    ? "Выберите категорию:"
-    : `Категории (страница ${page + 1}/${totalPages})`;
+    ? "Select category:"
+    : `Categories (page ${page + 1}/${totalPages})`;
   
   if (ctx.callbackQuery) {
     await ctx.editMessageText(text, { reply_markup: keyboard });
@@ -269,7 +812,7 @@ bot.callbackQuery(/^cat_/, async (ctx) => {
   
   try {
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(`Загружаю видео из категории "${slug}"...`);
+    await ctx.editMessageText(`Loading videos from "${slug}"...`);
     
     const result = await pornhub.videos.search({ 
       search: slug.replace(/-/g, " "),
@@ -281,19 +824,18 @@ bot.callbackQuery(/^cat_/, async (ctx) => {
         await sendVideoInfo(ctx, video);
       }
     } else {
-      await ctx.reply("Не удалось получить видео в этой категории.");
+      await ctx.reply("Could not get videos from this category.");
     }
   } catch (error) {
     console.error("Category videos error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    await ctx.reply("Error getting videos.");
   }
 });
 
-bot.hears("Популярные", async (ctx) => {
+bot.hears("Popular", async (ctx) => {
   ctx.session.state = null;
-  console.log("Popular button pressed");
   try {
-    await ctx.reply("Загружаю популярные видео...");
+    await ctx.reply("Loading popular videos...");
     const result = await pornhub.videos.mostViewed({ page: 1 });
     
     if (result.videos && result.videos.length > 0) {
@@ -301,18 +843,18 @@ bot.hears("Популярные", async (ctx) => {
         await sendVideoInfo(ctx, video);
       }
     } else {
-      await ctx.reply("Не удалось получить видео.");
+      await ctx.reply("Could not get videos.");
     }
   } catch (error) {
     console.error("Popular error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    await ctx.reply("Error getting videos.");
   }
 });
 
-bot.hears("Новые", async (ctx) => {
+bot.hears("New", async (ctx) => {
   ctx.session.state = null;
   try {
-    await ctx.reply("Загружаю новые видео...");
+    await ctx.reply("Loading new videos...");
     const result = await pornhub.videos.newest({ page: 1 });
     
     if (result.videos && result.videos.length > 0) {
@@ -320,23 +862,18 @@ bot.hears("Новые", async (ctx) => {
         await sendVideoInfo(ctx, video);
       }
     } else {
-      await ctx.reply("Не удалось получить видео.");
+      await ctx.reply("Could not get videos.");
     }
   } catch (error) {
     console.error("Newest error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    await ctx.reply("Error getting videos.");
   }
-});
-
-bot.hears("По ссылке", async (ctx) => {
-  ctx.session.state = "url";
-  await ctx.reply("Отправьте ссылку на видео с Pornhub:");
 });
 
 bot.command("popular", async (ctx) => {
   ctx.session.state = null;
   try {
-    await ctx.reply("Загружаю популярные видео...");
+    await ctx.reply("Loading popular videos...");
     const result = await pornhub.videos.mostViewed({ page: 1 });
     
     if (result.videos && result.videos.length > 0) {
@@ -344,18 +881,18 @@ bot.command("popular", async (ctx) => {
         await sendVideoInfo(ctx, video);
       }
     } else {
-      await ctx.reply("Не удалось получить видео.");
+      await ctx.reply("Could not get videos.");
     }
   } catch (error) {
     console.error("Popular error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    await ctx.reply("Error getting videos.");
   }
 });
 
 bot.command("newest", async (ctx) => {
   ctx.session.state = null;
   try {
-    await ctx.reply("Загружаю новые видео...");
+    await ctx.reply("Loading new videos...");
     const result = await pornhub.videos.newest({ page: 1 });
     
     if (result.videos && result.videos.length > 0) {
@@ -363,28 +900,96 @@ bot.command("newest", async (ctx) => {
         await sendVideoInfo(ctx, video);
       }
     } else {
-      await ctx.reply("Не удалось получить видео.");
+      await ctx.reply("Could not get videos.");
     }
   } catch (error) {
     console.error("Newest error:", error);
-    await ctx.reply("Ошибка при получении видео.");
+    await ctx.reply("Error getting videos.");
   }
 });
 
 bot.command("search", async (ctx) => {
   ctx.session.state = "search";
-  await ctx.reply("Введите поисковый запрос:");
+  await ctx.reply("Enter search query:");
+});
+
+bot.command("post", async (ctx) => {
+  if (!CHANNEL_ID) {
+    await ctx.reply("CHANNEL_ID not configured");
+    return;
+  }
+  
+  await ctx.reply("Posting video to channel...");
+  await postVideoToChannel();
+  await ctx.reply("Done!");
 });
 
 bot.on("message:text", async (ctx) => {
+  if (ctx.message.text?.startsWith("/")) {
+    return;
+  }
+  
   const state = ctx.session.state;
+  
+  if (state === "admin_broadcast") {
+    ctx.session.state = null;
+    const subscribers = loadSubscribers();
+    let sent = 0;
+    
+    for (const userId of subscribers) {
+      try {
+        await bot.api.sendMessage(userId, `📢 ${ctx.message.text}`);
+        sent++;
+      } catch (e) {}
+    }
+    
+    await ctx.reply(`Broadcast sent to ${sent}/${subscribers.length} subscribers.`);
+    await showAdminPanel(ctx);
+    return;
+  }
+  
+  if (state === "submit") {
+    const url = ctx.message.text;
+    ctx.session.state = null;
+    
+    if (!url.includes("pornhub.com")) {
+      await ctx.reply("Please send a link from pornhub.com");
+      return;
+    }
+    
+    const postedVideos = loadPostedVideos();
+    const submissions = loadSubmissions();
+    const videoId = url.match(/viewkey=([a-z0-9]+)/i)?.[1];
+    
+    if (videoId && (postedVideos.includes(videoId) || submissions.some(s => s.url.includes(videoId)))) {
+      await ctx.reply("This video has already been submitted or published.");
+      return;
+    }
+    
+    try {
+      const video = await pornhub.videos.details({ url });
+      submissions.push({
+        url,
+        videoId,
+        title: video.title,
+        username: ctx.from?.username || ctx.from?.first_name,
+        userId: ctx.from?.id,
+        date: Date.now()
+      });
+      saveSubmissions(submissions);
+      await ctx.reply("Video submitted for review!");
+    } catch (e) {
+      await ctx.reply("Error: could not get video info.");
+    }
+    return;
+  }
   
   if (state === "search") {
     const query = ctx.message.text;
     ctx.session.state = null;
     
     try {
-      await ctx.reply(`Ищу видео по запросу "${query}"...`);
+      await ctx.reply(`Searching for "${query}"...`);
       const result = await pornhub.videos.search({ search: query, page: 1 });
       
       if (result.videos && result.videos.length > 0) {
@@ -392,60 +997,35 @@ bot.on("message:text", async (ctx) => {
           await sendVideoInfo(ctx, video);
         }
       } else {
-        await ctx.reply("Ничего не найдено.");
+        await ctx.reply("Nothing found.");
       }
     } catch (error) {
       console.error("Search error:", error);
-      await ctx.reply("Ошибка при поиске.");
+      await ctx.reply("Search error.");
     }
     return;
   }
   
-  if (state === "url") {
-    const url = ctx.message.text;
-    ctx.session.state = null;
-    
-    if (!url.includes("pornhub.com")) {
-      await ctx.reply("Пожалуйста, отправьте ссылку с pornhub.com");
-      return;
-    }
-    
-    try {
-      await ctx.reply("Получаю информацию о видео...");
-      const video = await pornhub.videos.details({ url });
-      
-      if (video) {
-        await sendVideoDetails(ctx, video);
-      } else {
-        await ctx.reply("Не удалось получить информацию о видео.");
-      }
-    } catch (error) {
-      console.error("Video details error:", error);
-      await ctx.reply("Ошибка при получении информации о видео.");
-    }
-    return;
-  }
-  
-  await ctx.reply("Используйте кнопки меню или команды /search, /popular, /newest");
+  await ctx.reply("Use menu buttons or commands /search, /popular, /newest");
 });
 
 async function sendVideoInfo(ctx, video) {
-  const title = video.title || "Без названия";
-  const duration = video.duration || "Неизвестно";
-  const views = video.watchCount ? formatNumber(video.watchCount) : "Неизвестно";
+  const title = video.title || "Untitled";
+  const duration = video.duration || "Unknown";
+  const views = video.watchCount ? formatNumber(video.watchCount) : "Unknown";
   const url = video.url;
   const videoId = video.videoId;
   
   const text = 
     `<b>${escapeHtml(title)}</b>\n\n` +
-    `⏱ Длительность: ${duration}\n` +
-    `👁 Просмотров: ${views}` +
-    (url ? `\n\n🔗 <a href="${url}">Смотреть на Pornhub</a>` : "");
+    `⏱ Duration: ${duration}\n` +
+    `👁 Views: ${views}` +
+    (url ? `\n\n🔗 <a href="${url}">Watch on Pornhub</a>` : "");
   
   const keyboard = new InlineKeyboard()
-    .url("🎬 Смотреть", url || `https://www.pornhub.com/view_video.php?viewkey=${videoId}`)
+    .url("🎬 Watch", url || `https://www.pornhub.com/view_video.php?viewkey=${videoId}`)
     .row()
-    .text("📥 Скачать", `download_${videoId}`);
+    .text("📥 Download", `download_${videoId}`);
   
   const thumbnail = video.thumbnailUrl;
   
@@ -469,20 +1049,28 @@ bot.callbackQuery(/^download_/, async (ctx) => {
   const videoId = ctx.callbackQuery.data.slice(9);
   
   try {
-    await ctx.answerCallbackQuery({ text: "Скачиваю видео...", show_alert: false });
-    await ctx.reply("⏳ Скачиваю видео, подождите...");
+    await ctx.answerCallbackQuery({ text: "Downloading...", show_alert: false });
+    await ctx.reply("⏳ Downloading video, please wait...");
     
     const video = await pornhub.videos.details({ 
       url: `https://www.pornhub.com/view_video.php?viewkey=${videoId}` 
     });
     
     const files = video.files || {};
-    const videoUrl = files.low || files.high || files.HLS;
+    let hlsUrl = files.HLS;
+    if (hlsUrl && hlsUrl.startsWith("//")) {
+      hlsUrl = "https:" + hlsUrl;
+    }
     
-    if (!videoUrl) {
+    let videoUrl = files.low || files.high;
+    if (videoUrl && videoUrl.startsWith("//")) {
+      videoUrl = "https:" + videoUrl;
+    }
+    
+    if (!videoUrl && !hlsUrl) {
       await ctx.reply(
-        "Не удалось получить видео.\n\n" +
-        "Попробуйте скачать через онлайн-сервис:\n" +
+        "Could not get video.\n\n" +
+        "Try downloading via online service:\n" +
         `https://www.p2mp4.com/video/${videoId}`
       );
       return;
@@ -491,106 +1079,135 @@ bot.callbackQuery(/^download_/, async (ctx) => {
     const title = video.title || `video_${videoId}`;
     const safeTitle = title.replace(/[^a-zA-Z0-9а-яА-Я\s]/g, "").substring(0, 50);
     const inputFile = join(TMP_DIR, `${videoId}.mp4`);
-    const compressedFile = join(TMP_DIR, `${videoId}_compressed.mp4`);
     
     console.log(`Downloading video: ${videoId}`);
     
-    const response = await axios({
-      method: "get",
-      url: videoUrl,
-      responseType: "stream",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.pornhub.com/"
+    let downloadSuccess = false;
+    
+    if (hlsUrl) {
+      console.log("Trying HLS download...");
+      try {
+        await downloadHLS(hlsUrl, inputFile);
+        if (existsSync(inputFile)) {
+          const stats = statSync(inputFile);
+          if (stats.size > 10000) {
+            downloadSuccess = true;
+            console.log(`HLS download success: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          }
+        }
+      } catch (e) {
+        console.log("HLS download failed:", e.message);
       }
-    });
+    }
     
-    const writer = createWriteStream(inputFile);
-    response.data.pipe(writer);
+    if (!downloadSuccess && videoUrl) {
+      console.log("Trying direct download...");
+      
+      try {
+        const response = await axios({
+          method: "get",
+          url: videoUrl,
+          responseType: "stream",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.pornhub.com/"
+          }
+        });
+        
+        const writer = createWriteStream(inputFile);
+        response.data.pipe(writer);
+        
+        await new Promise((resolve, reject) => {
+          writer.on("finish", resolve);
+          writer.on("error", reject);
+        });
+        
+        downloadSuccess = true;
+      } catch (e) {
+        console.log("Direct download failed:", e.message);
+      }
+    }
     
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
+    if (!downloadSuccess) {
+      await ctx.reply(
+        "❌ Could not download video.\n\n" +
+        "Try via online service:\n" +
+        `https://www.p2mp4.com/video/${videoId}`
+      );
+      return;
+    }
     
     const stats = statSync(inputFile);
     const sizeMB = stats.size / (1024 * 1024);
     
     console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
     
-    let fileToSend = inputFile;
-    
-    if (sizeMB > 48) {
-      await ctx.reply(`📦 Видео ${sizeMB.toFixed(1)} MB, сжимаю до 50MB...`);
-      
-      await compressVideo(inputFile, compressedFile);
-      
-      if (existsSync(compressedFile)) {
-        const compressedStats = statSync(compressedFile);
-        const compressedSizeMB = compressedStats.size / (1024 * 1024);
-        
-        console.log(`Compressed: ${compressedSizeMB.toFixed(2)} MB`);
-        
-        if (compressedSizeMB < 48) {
-          fileToSend = compressedFile;
-        } else {
-          await ctx.reply(
-            `⚠️ Видео слишком большое (${sizeMB.toFixed(1)} MB).\n\n` +
-            `Telegram ограничивает размер файлов до 50MB.\n\n` +
-            `Скачайте напрямую:\n${videoUrl}`
-          );
-          cleanup([inputFile, compressedFile]);
-          return;
-        }
-      }
+    if (sizeMB > 50 && !BOT_API_URL) {
+      await ctx.reply(`⚠️ Video too large (${sizeMB.toFixed(1)} MB) for sending in DM.`);
+      cleanup([inputFile]);
+      return;
     }
     
-    const finalStats = statSync(fileToSend);
-    const finalSizeMB = finalStats.size / (1024 * 1024);
-    
-    await ctx.replyWithVideo(new InputFile(fileToSend), {
-      caption: `🎬 ${safeTitle}\n\n📦 Размер: ${finalSizeMB.toFixed(1)} MB`,
+    await ctx.replyWithVideo(new InputFile(inputFile), {
+      caption: `🎬 ${safeTitle}\n\n📦 Size: ${sizeMB.toFixed(1)} MB`,
       supports_streaming: true
     });
     
-    cleanup([inputFile, compressedFile]);
+    cleanup([inputFile]);
     
   } catch (error) {
     console.error("Download error:", error);
     await ctx.reply(
-      `❌ Ошибка при скачивании: ${error.message}\n\n` +
-      "Попробуйте скачать через онлайн-сервис:\n" +
+      `❌ Download error: ${error.message}\n\n` +
+      "Try via online service:\n" +
       `https://www.p2mp4.com/video/${videoId}`
     );
   }
 });
 
-function compressVideo(input, output) {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn("ffmpeg", [
-      "-i", input,
-      "-y",
-      "-c:v", "libx264",
-      "-preset", "fast",
-      "-crf", "28",
-      "-c:a", "aac",
-      "-b:a", "96k",
-      "-fs", "48M",
-      "-movflags", "+faststart",
-      output
-    ]);
-    
-    ffmpeg.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code}`));
-      }
-    });
-    
-    ffmpeg.on("error", reject);
-  });
-}
+bot.callbackQuery(/^like_/, async (ctx) => {
+  const msgId = ctx.callbackQuery.data.slice(5);
+  const stats = loadPostStats();
+  
+  if (!stats[msgId]) {
+    stats[msgId] = { likes: 0, dislikes: 0 };
+  }
+  
+  stats[msgId].likes++;
+  savePostStats(stats);
+  
+  const keyboard = new InlineKeyboard()
+    .text(`👍 ${stats[msgId].likes}`, `like_${msgId}`)
+    .text(`👎 ${stats[msgId].dislikes}`, `dislike_${msgId}`);
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (e) {}
+  
+  await ctx.answerCallbackQuery({ text: "👍 Thanks!", show_alert: false });
+});
+
+bot.callbackQuery(/^dislike_/, async (ctx) => {
+  const msgId = ctx.callbackQuery.data.slice(8);
+  const stats = loadPostStats();
+  
+  if (!stats[msgId]) {
+    stats[msgId] = { likes: 0, dislikes: 0 };
+  }
+  
+  stats[msgId].dislikes++;
+  savePostStats(stats);
+  
+  const keyboard = new InlineKeyboard()
+    .text(`👍 ${stats[msgId].likes}`, `like_${msgId}`)
+    .text(`👎 ${stats[msgId].dislikes}`, `dislike_${msgId}`);
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (e) {}
+  
+  await ctx.answerCallbackQuery({ text: "👎 Thanks for feedback!", show_alert: false });
+});
 
 function downloadHLS(hlsUrl, output) {
   return new Promise((resolve, reject) => {
@@ -605,24 +1222,63 @@ function downloadHLS(hlsUrl, output) {
       output
     ]);
     
+    const timeout = setTimeout(() => {
+      console.log("HLS download timeout, killing ffmpeg...");
+      ffmpeg.kill();
+      reject(new Error("HLS download timeout"));
+    }, 600000);
+    
     ffmpeg.stderr.on("data", (data) => {
-      console.log("ffmpeg stderr:", data.toString().substring(0, 200));
+      const str = data.toString();
+      if (str.includes("frame=") || str.includes("Duration:")) {
+        console.log("ffmpeg:", str.substring(0, 100));
+      }
     });
     
     ffmpeg.on("close", (code) => {
-      if (code === 0) {
+      clearTimeout(timeout);
+      if (code === 0 || code === null) {
         resolve();
       } else {
         reject(new Error(`FFmpeg HLS download exited with code ${code}`));
       }
     });
     
-    ffmpeg.on("error", reject);
+    ffmpeg.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+function addWatermark(input, output) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn("ffmpeg", [
+      "-i", input,
+      "-vf", `drawtext=text='${WATERMARK_TEXT}':fontcolor=white@0.5:fontsize=18:x=w-tw-10:y=h-th-10`,
+      "-c:a", "copy",
+      "-y",
+      output
+    ]);
     
-    setTimeout(() => {
+    const timeout = setTimeout(() => {
       ffmpeg.kill();
-      reject(new Error("HLS download timeout"));
-    }, 180000);
+      reject(new Error("Watermark timeout"));
+    }, 300000);
+    
+    ffmpeg.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Watermark failed with code ${code}`));
+      }
+    });
+    
+    ffmpeg.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
 }
 
@@ -638,51 +1294,18 @@ function cleanup(files) {
   }
 }
 
-async function sendVideoDetails(ctx, video) {
-  const title = video.title || "Без названия";
-  const duration = video.duration || "Неизвестно";
-  const views = video.watchCount ? formatNumber(video.watchCount) : "Неизвестно";
-  const rating = video.ratingPercent ? `${video.ratingPercent}%` : "Неизвестно";
-  const votes = video.voteCount ? formatNumber(video.voteCount) : "Неизвестно";
-  const url = video.url;
-  const tags = video.tags?.slice(0, 5).join(", ") || "Нет";
-  const categories = video.categories?.slice(0, 3).join(", ") || "Нет";
-  const files = video.files || {};
-  
-  const downloadLinks = [];
-  if (files.high) downloadLinks.push(`📥 Высокое качество`);
-  if (files.low) downloadLinks.push(`📥 Среднее качество`);
-  if (files.HLS) downloadLinks.push(`📥 HLS`);
-  
-  const text = 
-    `<b>${escapeHtml(title)}</b>\n\n` +
-    `⏱ Длительность: ${duration}\n` +
-    `👁 Просмотров: ${views}\n` +
-    `⭐ Рейтинг: ${rating} (${votes} голосов)\n` +
-    `📂 Категории: ${categories}\n` +
-    `🏷 Теги: ${tags}`;
-  
-  const keyboard = new InlineKeyboard()
-    .url("🎬 Смотреть", url)
-    .row()
-    .text("📥 Скачать", `download_${video.videoId}`);
-  
-  const thumbnail = video.thumbnailUrls?.[0] || files.thumb;
-  
-  if (thumbnail) {
-    try {
-      await ctx.replyWithPhoto(thumbnail, {
-        caption: text,
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      });
-      return;
-    } catch (e) {
-      console.error("Photo error:", e);
+function cleanupAllTempFiles() {
+  try {
+    const files = readdirSync(TMP_DIR);
+    for (const file of files) {
+      try {
+        unlinkSync(join(TMP_DIR, file));
+        console.log(`Cleaned up: ${file}`);
+      } catch (e) {}
     }
+  } catch (e) {
+    console.log("No temp files to clean");
   }
-  
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
 
 function formatNumber(num) {
@@ -702,94 +1325,113 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-async function getRandomVideoFromCategory(category) {
-  try {
-    const result = await pornhub.videos.search({ 
-      search: category.replace(/-/g, " "),
-      page: Math.floor(Math.random() * 5) + 1
-    });
-    
-    const postedVideos = loadPostedVideos();
-    const filtered = result.videos.filter(v => 
-      !postedVideos.includes(v.videoId)
-    );
-    
-    if (filtered.length > 0) {
-      const randomIndex = Math.floor(Math.random() * Math.min(10, filtered.length));
-      return filtered[randomIndex];
-    }
-    return result.videos[Math.floor(Math.random() * result.videos.length)];
-  } catch (e) {
-    console.error(`Error getting video from category ${category}:`, e);
-    return null;
-  }
+function generateEnglishCaption(title, duration, views, sizeMB, categories) {
+  const escTitle = escapeHtml(title);
+  const hashtags = categories?.slice(0, 5).map(c => `#${c.replace(/[^a-zA-Z0-9]/g, "")}`).join(" ") || "";
+  return `🔥 <b>${escTitle}</b>\n\n⏱ ${duration} | 👁 ${views} | 📦 ${sizeMB.toFixed(1)} MB\n\n${hashtags}`;
 }
 
-async function getUnpostedVideo(source = "popular") {
+async function getUnpostedVideo(maxAttempts = 20) {
   const postedVideos = loadPostedVideos();
   
-  let videos = [];
-  try {
-    if (source === "popular") {
-      const result = await pornhub.videos.mostViewed({ page: Math.floor(Math.random() * 3) + 1 });
-      videos = result.videos || [];
-    } else {
-      const result = await pornhub.videos.newest({ page: Math.floor(Math.random() * 3) + 1 });
-      videos = result.videos || [];
+  const submissions = loadSubmissions();
+  if (submissions.length > 0 && Math.random() > 0.7) {
+    const pending = submissions.filter(s => !postedVideos.includes(s.videoId));
+    if (pending.length > 0) {
+      const random = pending[Math.floor(Math.random() * pending.length)];
+      try {
+        const details = await pornhub.videos.details({ url: random.url });
+        return { video: { ...details, url: random.url }, source: "user" };
+      } catch (e) {}
     }
-  } catch (e) {
-    console.error(`Error getting ${source} videos:`, e);
   }
   
-  const unposted = videos.filter(v => !postedVideos.includes(v.videoId));
-  return unposted.length > 0 ? unposted[0] : null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const sources = ["popular", "newest"];
+    const source = sources[attempt % 2];
+    
+    try {
+      let videos = [];
+      if (source === "popular") {
+        const result = await pornhub.videos.mostViewed({ page: Math.floor(Math.random() * 3) + 1 });
+        videos = result.videos || [];
+      } else {
+        const result = await pornhub.videos.newest({ page: Math.floor(Math.random() * 3) + 1 });
+        videos = result.videos || [];
+      }
+      
+      for (const video of videos) {
+        if (postedVideos.includes(video.videoId)) continue;
+        console.log(`Found video: ${video.title} (${video.duration})`);
+        return { video, source };
+      }
+    } catch (e) {
+      console.error(`Error getting videos from ${source}:`, e.message);
+    }
+  }
+  
+  return null;
 }
+
+async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
+  const apiUrl = BOT_API_URL || "https://api.telegram.org";
+  const url = `${apiUrl}/bot${BOT_TOKEN}/sendVideo`;
+  
+  const keyboard = new InlineKeyboard()
+    .text(`👍 0`, `like_${messageId}`)
+    .text(`👎 0`, `dislike_${messageId}`);
+  
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("video", createReadStream(filePath));
+  form.append("caption", caption);
+  form.append("parse_mode", "HTML");
+  form.append("supports_streaming", "true");
+  form.append("reply_markup", JSON.stringify(keyboard));
+  
+  const response = await axios.post(url, form, {
+    headers: form.getHeaders(),
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  
+  return response.data;
+}
+
+let isPostingLocked = false;
 
 async function postVideoToChannel() {
-  if (!CHANNEL_ID) {
-    console.log("CHANNEL_ID not set, skipping auto-post");
+  if (isPostingLocked) {
+    console.log("Auto-post already in progress, skipping...");
     return;
   }
   
-  console.log("Starting auto-post to channel...");
-  
-  let video = null;
-  let source = "";
-  
-  const postedVideos = loadPostedVideos();
-  const candidates = [];
-  
-  for (const src of ["popular", "newest", "popular", "newest"]) {
-    const v = await getUnpostedVideo(src);
-    if (v) {
-      candidates.push({ video: v, source: src });
-    }
-  }
-  
-  if (candidates.length > 0) {
-    const randomIdx = Math.floor(Math.random() * candidates.length);
-    video = candidates[randomIdx].video;
-    source = candidates[randomIdx].source;
-  }
-  
-  if (!video) {
-    console.log("No unposted videos from popular/new, trying random category...");
-    
-    const categories = getDefaultCategories().filter(c => 
-      !EXCLUDED_CATEGORIES.some(ex => c.slug.includes(ex) || c.name.toLowerCase().includes(ex))
-    );
-    
-    const randomCategory = categories[Math.floor(Math.random() * categories.length)];
-    video = await getRandomVideoFromCategory(randomCategory.slug);
-    source = `category: ${randomCategory.name}`;
-  }
-  
-  if (!video) {
-    console.log("No video found for posting");
+  const settings = loadSettings();
+  if (!settings.autoPostEnabled) {
+    console.log("Auto-post disabled in settings");
     return;
   }
+  
+  isPostingLocked = true;
   
   try {
+    if (!CHANNEL_ID) {
+      console.log("CHANNEL_ID not set, skipping auto-post");
+      return;
+    }
+    
+    console.log("Starting auto-post to channel...");
+    
+    const result = await getUnpostedVideo(30);
+    if (!result) {
+      console.log("No video found, skipping...");
+      return;
+    }
+    
+    const video = result.video;
+    const source = result.source;
+    const postedVideos = loadPostedVideos();
+    
     const details = await pornhub.videos.details({ url: video.url });
     
     if (!filterVideoByCategories(details)) {
@@ -797,11 +1439,12 @@ async function postVideoToChannel() {
       return;
     }
     
-    const title = details.title || "Без названия";
-    const duration = details.duration || "Неизвестно";
-    const views = details.watchCount ? formatNumber(details.watchCount) : "Неизвестно";
+    const title = details.title || "Untitled";
+    const duration = details.duration || "Unknown";
+    const views = details.watchCount ? formatNumber(details.watchCount) : "Unknown";
     const url = details.url;
     const videoId = details.videoId;
+    const categories = details.categories || [];
     
     const files = details.files || {};
     console.log("Available files:", JSON.stringify(files).substring(0, 500));
@@ -820,7 +1463,7 @@ async function postVideoToChannel() {
     console.log(`HLS URL: ${hlsUrl?.substring(0, 100)}`);
     
     const inputFile = join(TMP_DIR, `${videoId}_channel.mp4`);
-    const compressedFile = join(TMP_DIR, `${videoId}_channel_compressed.mp4`);
+    const watermarkedFile = join(TMP_DIR, `${videoId}_watermarked.mp4`);
     
     let downloadSuccess = false;
     
@@ -858,7 +1501,7 @@ async function postVideoToChannel() {
           }
         });
         
-        console.log(`Response status: ${response.status}, Content-Length: ${response.headers['content-length']}, Content-Type: ${response.headers['content-type']}`);
+        console.log(`Response status: ${response.status}`);
         
         const buffer = Buffer.from(response.data);
         console.log(`Buffer size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
@@ -874,179 +1517,91 @@ async function postVideoToChannel() {
     }
     
     if (!downloadSuccess) {
-      console.log("All download methods failed, posting as link...");
-      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+      console.log("All download methods failed");
       return;
     }
     
-    const stats = statSync(inputFile);
+    let finalFile = inputFile;
+    
+    if (settings.watermarkEnabled) {
+      try {
+        console.log("Adding watermark...");
+        await addWatermark(inputFile, watermarkedFile);
+        if (existsSync(watermarkedFile)) {
+          unlinkSync(inputFile);
+          finalFile = watermarkedFile;
+          console.log("Watermark added successfully");
+        }
+      } catch (e) {
+        console.log("Watermark failed, using original:", e.message);
+      }
+    }
+    
+    const stats = statSync(finalFile);
     const sizeMB = stats.size / (1024 * 1024);
     
-    console.log(`Downloaded: ${sizeMB.toFixed(2)} MB`);
+    console.log(`Final size: ${sizeMB.toFixed(2)} MB`);
     
     if (sizeMB < 0.1) {
-      console.log("File too small, posting as link...");
-      cleanup([inputFile]);
-      await postAsLink(CHANNEL_ID, details, postedVideos, source);
+      console.log("File too small");
+      cleanup([finalFile]);
       return;
     }
     
-    let fileToSend = inputFile;
+    const messageId = Date.now().toString();
+    console.log(`Sending video to channel: ${sizeMB.toFixed(1)} MB`);
     
-    if (sizeMB > 48) {
-        console.log(`Compressing video from ${sizeMB.toFixed(1)} MB...`);
-        
-        try {
-          await compressVideo(inputFile, compressedFile);
-          
-          if (existsSync(compressedFile)) {
-            const compressedStats = statSync(compressedFile);
-            const compressedSizeMB = compressedStats.size / (1024 * 1024);
-            
-            console.log(`Compressed: ${compressedSizeMB.toFixed(2)} MB`);
-            
-            if (compressedSizeMB < 48) {
-              fileToSend = compressedFile;
-            } else {
-              console.log("Video too large even after compression, posting as link...");
-              cleanup([inputFile, compressedFile]);
-              await postAsLink(CHANNEL_ID, details, postedVideos, source);
-              return;
-            }
-          }
-        } catch (compressError) {
-          console.error("Compression failed:", compressError);
-          cleanup([inputFile, compressedFile]);
-          await postAsLink(CHANNEL_ID, details, postedVideos, source);
-          return;
-        }
-      }
+    const caption = generateEnglishCaption(title, duration, views, sizeMB, categories);
+    
+    try {
+      const sendResult = await sendVideoViaFormData(CHANNEL_ID, finalFile, caption, messageId);
+      console.log("Video sent successfully:", sendResult.ok);
       
-      const finalStats = statSync(fileToSend);
-      const finalSizeMB = finalStats.size / (1024 * 1024);
+      const actualMsgId = sendResult.result?.message_id?.toString() || messageId;
+      const postStats = loadPostStats();
+      postStats[actualMsgId] = { likes: 0, dislikes: 0, videoId, title, source };
+      savePostStats(postStats);
       
-      const caption = `🔥 <b>${escapeHtml(title)}</b>\n\n⏱ ${duration} | 👁 ${views} | 📦 ${finalSizeMB.toFixed(1)} MB`;
-      
-      await bot.api.sendVideo(CHANNEL_ID, new InputFile(fileToSend), {
-        caption: caption,
-        parse_mode: "HTML",
-        supports_streaming: true
-      });
-      
-      cleanup([inputFile, compressedFile]);
+      cleanup([finalFile]);
       
       postedVideos.push(details.videoId);
       savePostedVideos(postedVideos);
       
-      console.log(`Posted video to channel: ${title} (${finalSizeMB.toFixed(1)} MB, source: ${source})`);
-      
-  } catch (e) {
-    console.error("Error posting video:", e);
-  }
-}
-
-async function postAsLink(channelId, details, postedVideos, source) {
-  const title = details.title || "Без названия";
-  const duration = details.duration || "Неизвестно";
-  const views = details.watchCount ? formatNumber(details.watchCount) : "Неизвестно";
-  const url = details.url;
-  
-  const text = 
-    `🔥 <b>${escapeHtml(title)}</b>\n\n` +
-    `⏱ ${duration} | 👁 ${views}\n\n` +
-    `🔗 <a href="${url}">Смотреть на Pornhub</a>`;
-  
-  const keyboard = new InlineKeyboard()
-    .url("🎬 Смотреть", url)
-    .row()
-    .text("📥 Скачать", `download_${details.videoId}`);
-  
-  const thumbnail = details.thumbnailUrls?.[0] || details.files?.thumb;
-  
-  try {
-    if (thumbnail) {
-      try {
-        const thumbResp = await axios({
-          method: "get",
-          url: thumbnail,
-          responseType: "arraybuffer",
-          timeout: 30000,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.pornhub.com/"
-          }
-        });
-        
-        if (thumbResp.data && thumbResp.data.byteLength > 1000) {
-          const thumbFile = join(TMP_DIR, `${details.videoId}_thumb.jpg`);
-          require("fs").writeFileSync(thumbFile, Buffer.from(thumbResp.data));
-          
-          await bot.api.sendPhoto(channelId, new InputFile(thumbFile), {
-            caption: text,
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          });
-          
-          cleanup([thumbFile]);
-        } else {
-          throw new Error("Thumbnail too small");
-        }
-      } catch (thumbError) {
-        console.log("Thumbnail download failed, sending text only");
-        await bot.api.sendMessage(channelId, text, {
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-        });
-      }
-    } else {
-      await bot.api.sendMessage(channelId, text, {
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      });
+      console.log(`Posted video to channel: ${title} (${sizeMB.toFixed(1)} MB, source: ${source})`);
+    } catch (sendErr) {
+      console.error("Send error:", sendErr.response?.data || sendErr.message);
+      cleanup([finalFile]);
     }
     
-    postedVideos.push(details.videoId);
-    savePostedVideos(postedVideos);
-    console.log(`Posted as link: ${title} (source: ${source})`);
   } catch (e) {
-    console.error("Error posting link:", e);
+    console.error("Error posting video:", e);
+  } finally {
+    isPostingLocked = false;
   }
 }
-
-bot.command("post", async (ctx) => {
-  if (!CHANNEL_ID) {
-    await ctx.reply("CHANNEL_ID не настроен");
-    return;
-  }
-  
-  await ctx.reply("Публикую видео в канал...");
-  await postVideoToChannel();
-  await ctx.reply("Готово!");
-});
-
-bot.command("setchannel", async (ctx) => {
-  const chatId = ctx.message?.text?.split(" ")[1];
-  if (!chatId) {
-    await ctx.reply("Использование: /setchannel @channelname или /setchannel -1001234567890");
-    return;
-  }
-  
-  await ctx.reply(`Канал установлен: ${chatId}\nДобавьте этот ID в .env как CHANNEL_ID`);
-});
 
 bot.start();
 console.log("Bot started!");
+console.log("Features enabled:");
+console.log("- Local Bot API:", BOT_API_URL ? "YES (files up to 2GB)" : "NO");
+console.log("- Admin Panel: /admin");
+console.log("- Watermark:", WATERMARK_TEXT);
+console.log("- User submissions: enabled");
+console.log("- Newsletter: enabled");
+console.log("- Analytics: enabled");
+cleanupAllTempFiles();
 
 if (CHANNEL_ID) {
   console.log(`Auto-posting enabled to channel: ${CHANNEL_ID}`);
+  console.log("Interval:", loadSettings().interval, "minutes");
   
   setTimeout(() => {
     postVideoToChannel();
-  }, 5000);
+  }, 10000);
   
   setInterval(() => {
     postVideoToChannel();
-  }, 60 * 60 * 1000);
+  }, loadSettings().interval * 60 * 1000);
   
   setInterval(() => {
     const posted = loadPostedVideos();
