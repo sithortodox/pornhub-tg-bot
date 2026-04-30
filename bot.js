@@ -1479,32 +1479,19 @@ async function postVideoToChannel() {
     
     let downloadSuccess = false;
     
-    if (hlsUrl) {
-      console.log("Trying to download via HLS with ffmpeg...");
-      try {
-        await downloadHLS(hlsUrl, inputFile);
-        if (existsSync(inputFile)) {
-          const stats = statSync(inputFile);
-          if (stats.size > 10000) {
-            downloadSuccess = true;
-            console.log(`HLS download success: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-          }
-        }
-      } catch (e) {
-        console.log("HLS download failed:", e.message);
-      }
-    }
-    
-    if (!downloadSuccess && videoUrl) {
-      console.log(`Downloading video for channel: ${title}`);
+    // Try direct URL first (more reliable than HLS)
+    if (videoUrl) {
+      console.log(`Downloading video directly: ${title}`);
       
       try {
         const response = await axios({
           method: "get",
           url: videoUrl,
           responseType: "arraybuffer",
-          timeout: 120000,
+          timeout: 300000,
           maxRedirects: 10,
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
@@ -1518,13 +1505,37 @@ async function postVideoToChannel() {
         const buffer = Buffer.from(response.data);
         console.log(`Buffer size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
         
-        if (buffer.length > 10000) {
-          require("fs").writeFileSync(inputFile, buffer);
-          downloadSuccess = true;
-        }
+        writeFileSync(inputFile, buffer);
         
+        if (existsSync(inputFile)) {
+          const stats = statSync(inputFile);
+          if (stats.size > 10000) {
+            downloadSuccess = true;
+            console.log(`Direct download success: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          }
+        }
       } catch (e) {
         console.log("Direct download failed:", e.message);
+        if (existsSync(inputFile)) {
+          unlinkSync(inputFile);
+        }
+      }
+    }
+    
+    // Fallback to HLS if direct URL failed
+    if (!downloadSuccess && hlsUrl) {
+      console.log("Trying to download via HLS with ffmpeg...");
+      try {
+        await downloadHLS(hlsUrl, inputFile);
+        if (existsSync(inputFile)) {
+          const stats = statSync(inputFile);
+          if (stats.size > 10000) {
+            downloadSuccess = true;
+            console.log(`HLS download success: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          }
+        }
+      } catch (e) {
+        console.log("HLS download failed:", e.message);
       }
     }
     
