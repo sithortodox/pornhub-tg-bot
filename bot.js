@@ -1,19 +1,17 @@
 import { Bot, session, InlineKeyboard, InputFile } from "grammy";
-import pornhub from "pornhub";
-import { load } from "cheerio";
+import { createWriteStream, createReadStream, existsSync, statSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
+import { join, dirname } from "path";
+import { tmpdir } from "os";
 import axios from "axios";
 import FormData from "form-data";
-import { spawn } from "child_process";
-import { createWriteStream, createReadStream, existsSync, statSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { fileURLToPath } from "url";
+import { createHash } from "crypto";
+import pornhub from "pornhub.js";
 
-const TMP_DIR = join(tmpdir(), "pornhub-bot");
-if (!existsSync(TMP_DIR)) {
-  mkdirSync(TMP_DIR, { recursive: true });
-}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-const DATA_DIR = "/app/data";
+const DATA_DIR = join(__dirname, "data");
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -23,6 +21,9 @@ const POST_STATS_FILE = join(DATA_DIR, "post_stats.json");
 const SUBMISSIONS_FILE = join(DATA_DIR, "submissions.json");
 const SUBSCRIBERS_FILE = join(DATA_DIR, "subscribers.json");
 const SETTINGS_FILE = join(DATA_DIR, "settings.json");
+const FAVORITES_FILE = join(DATA_DIR, "favorites.json");
+const REPORTS_FILE = join(DATA_DIR, "reports.json");
+const RATE_LIMIT_FILE = join(DATA_DIR, "rate_limits.json");
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const BOT_API_URL = process.env.BOT_API_URL;
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -118,6 +119,157 @@ function loadSubscribers() {
 
 function saveSubscribers(subscribers) {
   writeFileSync(SUBSCRIBERS_FILE, JSON.stringify([...new Set(subscribers)]));
+}
+
+// ============ FAVORITES ============
+function loadFavorites() {
+  if (existsSync(FAVORITES_FILE)) {
+    try {
+      return JSON.parse(readFileSync(FAVORITES_FILE, "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function saveFavorites(favorites) {
+  writeFileSync(FAVORITES_FILE, JSON.stringify(favorites));
+}
+
+function addFavorite(userId, videoData) {
+  const favorites = loadFavorites();
+  if (!favorites[userId]) {
+    favorites[userId] = [];
+  }
+  // Max 50 favorites per user
+  if (favorites[userId].length >= 50) {
+    return false;
+  }
+  favorites[userId].push({
+    ...videoData,
+    addedAt: Date.now()
+  });
+  saveFavorites(favorites);
+  return true;
+}
+
+function removeFavorite(userId, index) {
+  const favorites = loadFavorites();
+  if (favorites[userId] && favorites[userId][index]) {
+    favorites[userId].splice(index, 1);
+    saveFavorites(favorites);
+    return true;
+  }
+  return false;
+}
+
+function getUserFavorites(userId) {
+  const favorites = loadFavorites();
+  return favorites[userId] || [];
+}
+
+// ============ REPORTS (MODERATION) ============
+function loadReports() {
+  if (existsSync(REPORTS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(REPORTS_FILE, "utf8"));
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveReports(reports) {
+  writeFileSync(REPORTS_FILE, JSON.stringify(reports.slice(-100)));
+}
+
+function addReport(reportData) {
+  const reports = loadReports();
+  reports.push({
+    ...reportData,
+    createdAt: Date.now()
+  });
+  saveReports(reports);
+}
+
+// ============ RATE LIMITING (ANTI-SPAM) ============
+function loadRateLimits() {
+  if (existsSync(RATE_LIMIT_FILE)) {
+    try {
+      return JSON.parse(readFileSync(RATE_LIMIT_FILE, "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function saveRateLimits(limits) {
+  writeFileSync(RATE_LIMIT_FILE, JSON.stringify(limits));
+}
+
+function checkRateLimit(userId, maxRequests = 5, windowMs = 60000, blockMs = 300000) {
+  const limits = loadRateLimits();
+  const now = Date.now();
+  
+  if (!limits[userId]) {
+    limits[userId] = { requests: [], blockedUntil: 0 };
+  }
+  
+  // Check if blocked
+  if (limits[userId].blockedUntil > now) {
+    const remaining = Math.ceil((limits[userId].blockedUntil - now) / 1000);
+    return { allowed: false, blocked: true, remaining };
+  }
+  
+  // Clean old requests
+  limits[userId].requests = limits[userId].requests.filter(t => now - t < windowMs);
+  
+  // Check limit
+  if (limits[userId].requests.length >= maxRequests) {
+    // Block user
+    limits[userId].blockedUntil = now + blockMs;
+    saveRateLimits(limits);
+    return { allowed: false, blocked: true, remaining: blockMs / 1000 };
+  }
+  
+  // Add request
+  limits[userId].requests.push(now);
+  saveRateLimits(limits);
+  return { allowed: true };
+}
+
+// ============ ANTI-REPEAT ============
+function hashTitle(title) {
+  return createHash('md5').update(title.toLowerCase().trim()).digest('hex').substring(0, 8);
+}
+
+function isVideoPosted(videoId, title) {
+  const postedVideos = loadPostedVideos();
+  const titleHash = hashTitle(title);
+  
+  // Check by videoId
+  if (postedVideos.includes(videoId)) {
+    return true;
+  }
+  
+  // Check by title hash (stored in format: videoId:titleHash)
+  const postedWithHash = postedVideos.filter(v => typeof v === 'object');
+  return postedWithHash.some(v => v.titleHash === titleHash);
+}
+
+function markVideoAsPosted(videoId, title) {
+  const postedVideos = loadPostedVideos();
+  const titleHash = hashTitle(title);
+  
+  // Store as object with videoId and titleHash
+  const existing = postedVideos.find(v => typeof v === 'object' && v.videoId === videoId);
+  if (!existing) {
+    postedVideos.push({ videoId, titleHash });
+    savePostedVideos(postedVideos);
+  }
 }
 
 const bot = new Bot(BOT_TOKEN, {
@@ -279,6 +431,7 @@ async function showAdminPanel(ctx) {
   const postedVideos = loadPostedVideos();
   const subscribers = loadSubscribers();
   const submissions = loadSubmissions();
+  const reports = loadReports();
   const settings = loadSettings();
   
   let totalLikes = 0;
@@ -302,6 +455,7 @@ async function showAdminPanel(ctx) {
 ├ 📤 Posts: ${postedVideos.length}
 ├ 👥 Subscribers: ${subscribers.length}
 ├ 📝 Submissions: ${submissions.length}
+├ 🚫 Reports: ${reports.length}
 ├ 👍 Likes: ${totalLikes}
 ├ 👎 Dislikes: ${totalDislikes}
 └ ⭐ Rating: ${rating}%
@@ -328,7 +482,9 @@ async function showAdminPanel(ctx) {
     .text("🏷 Watermark", "admin_toggle_watermark")
     .text("🔄 Post Now", "admin_post_now")
     .row()
+    .text("🚫 Reports", "admin_reports")
     .text("📢 Broadcast", "admin_broadcast")
+    .row()
     .text("🗑 Clear Data", "admin_clear");
 
   if (ctx.callbackQuery) {
@@ -505,6 +661,40 @@ bot.callbackQuery(/^admin_/, async (ctx) => {
   if (action === "broadcast") {
     ctx.session.state = "admin_broadcast";
     await ctx.editMessageText("📢 <b>Broadcast</b>\n\nEnter message to send to all subscribers:", { parse_mode: "HTML" });
+    return;
+  }
+  
+  if (action === "reports") {
+    const reports = loadReports();
+    
+    if (reports.length === 0) {
+      await ctx.answerCallbackQuery({ text: "No reports", show_alert: true });
+      return;
+    }
+    
+    let text = "🚫 <b>Reports</b>\n\n";
+    
+    reports.slice(-10).forEach((r, i) => {
+      text += `${i + 1}. <b>${r.title}</b>\n`;
+      text += `   By: @${r.userName} (ID: ${r.userId})\n`;
+      text += `   Video: ${r.videoId}\n\n`;
+    });
+    
+    text += `\nTotal: ${reports.length} reports`;
+    
+    const keyboard = new InlineKeyboard()
+      .text("🗑 Clear Reports", "admin_clear_reports")
+      .row()
+      .text("◀️ Back", "admin_back");
+    
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  
+  if (action === "clear_reports") {
+    saveReports([]);
+    await ctx.answerCallbackQuery({ text: "Reports cleared!" });
+    await showAdminPanel(ctx);
     return;
   }
   
@@ -704,6 +894,96 @@ bot.command("unsubscribe", async (ctx) => {
     saveSubscribers(subscribers);
   }
   await ctx.reply("You unsubscribed from announcements.");
+});
+
+// ============ FAVORITES COMMANDS ============
+bot.command("favorites", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  
+  const rateCheck = checkRateLimit(userId);
+  if (!rateCheck.allowed) {
+    await ctx.reply(`⏳ Too many requests. Try again in ${rateCheck.remaining} seconds.`);
+    return;
+  }
+  
+  const favorites = getUserFavorites(userId);
+  
+  if (favorites.length === 0) {
+    await ctx.reply("You have no saved videos.\n\nUse /save <video_link> to add favorites.");
+    return;
+  }
+  
+  let message = "⭐ <b>Your Favorites:</b>\n\n";
+  
+  favorites.forEach((fav, index) => {
+    message += `${index + 1}. <a href="${fav.url}">${fav.title}</a>\n`;
+  });
+  
+  message += "\nTo delete: /delete_fav <number>";
+  
+  await ctx.reply(message, { parse_mode: "HTML", disable_web_page_preview: true });
+});
+
+bot.command("save", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  
+  const rateCheck = checkRateLimit(userId);
+  if (!rateCheck.allowed) {
+    await ctx.reply(`⏳ Too many requests. Try again in ${rateCheck.remaining} seconds.`);
+    return;
+  }
+  
+  const args = ctx.message?.text?.split(" ").slice(1);
+  const url = args?.[0];
+  
+  if (!url || !url.includes("pornhub.com")) {
+    await ctx.reply("Usage: /save <pornhub_video_url>\n\nExample: /save https://www.pornhub.com/view_video.php?viewkey=xxx");
+    return;
+  }
+  
+  try {
+    const videoId = url.split("viewkey=")[1]?.split("&")[0] || url.split("/")[3];
+    
+    const details = await pornhub.videos.details({ url });
+    
+    const success = addFavorite(userId, {
+      videoId,
+      title: details.title,
+      url: url,
+      thumbnail: details.thumbnail
+    });
+    
+    if (success) {
+      await ctx.reply(`✅ Saved to favorites!\n\n<b>${details.title}</b>`, { parse_mode: "HTML" });
+    } else {
+      await ctx.reply("⚠️ Maximum 50 favorites reached. Delete some first with /delete_fav");
+    }
+  } catch (e) {
+    await ctx.reply("❌ Failed to save. Check the URL.");
+  }
+});
+
+bot.command("delete_fav", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  
+  const args = ctx.message?.text?.split(" ").slice(1);
+  const index = parseInt(args?.[0]) - 1;
+  
+  if (isNaN(index) || index < 0) {
+    await ctx.reply("Usage: /delete_fav <number>\n\nUse /favorites to see the list.");
+    return;
+  }
+  
+  const success = removeFavorite(userId, index);
+  
+  if (success) {
+    await ctx.reply(`✅ Deleted favorite #${index + 1}`);
+  } else {
+    await ctx.reply("❌ Invalid number. Use /favorites to see the list.");
+  }
 });
 
 bot.command("broadcast", async (ctx) => {
@@ -1178,13 +1458,37 @@ bot.callbackQuery(/^like_/, async (ctx) => {
   
   const keyboard = new InlineKeyboard()
     .text(`👍 ${stats[msgId].likes}`, `like_${msgId}`)
-    .text(`👎 ${stats[msgId].dislikes}`, `dislike_${msgId}`);
+    .text(`👎 ${stats[msgId].dislikes}`, `dislike_${msgId}`)
+    .text(`🚫 Report`, `report_${msgId}`);
   
   try {
     await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
   } catch (e) {}
   
-  await ctx.answerCallbackQuery({ text: "👍 Thanks!", show_alert: false });
+  await ctx.answerCallbackQuery({ text: "👍 Thanks for feedback!", show_alert: false });
+});
+
+bot.callbackQuery(/^dislike_/, async (ctx) => {
+  const msgId = ctx.callbackQuery.data.slice(8);
+  const stats = loadPostStats();
+  
+  if (!stats[msgId]) {
+    stats[msgId] = { likes: 0, dislikes: 0 };
+  }
+  
+  stats[msgId].dislikes++;
+  savePostStats(stats);
+  
+  const keyboard = new InlineKeyboard()
+    .text(`👍 ${stats[msgId].likes}`, `like_${msgId}`)
+    .text(`👎 ${stats[msgId].dislikes}`, `dislike_${msgId}`)
+    .text(`🚫 Report`, `report_${msgId}`);
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (e) {}
+  
+  await ctx.answerCallbackQuery({ text: "👎 Thanks for feedback!", show_alert: false });
 });
 
 bot.callbackQuery(/^dislike_/, async (ctx) => {
@@ -1207,6 +1511,53 @@ bot.callbackQuery(/^dislike_/, async (ctx) => {
   } catch (e) {}
   
   await ctx.answerCallbackQuery({ text: "👎 Thanks for feedback!", show_alert: false });
+});
+
+// ============ REPORT HANDLER ============
+bot.callbackQuery(/^report_/, async (ctx) => {
+  const msgId = ctx.callbackQuery.data.slice(7);
+  const userId = ctx.from?.id;
+  const userName = ctx.from?.username || ctx.from?.first_name || "Unknown";
+  
+  const stats = loadPostStats();
+  const videoData = stats[msgId];
+  
+  if (!videoData) {
+    await ctx.answerCallbackQuery({ text: "Cannot find video data", show_alert: true });
+    return;
+  }
+  
+  // Check if user already reported
+  const reports = loadReports();
+  const alreadyReported = reports.some(r => r.msgId === msgId && r.userId === userId);
+  
+  if (alreadyReported) {
+    await ctx.answerCallbackQuery({ text: "You already reported this video", show_alert: true });
+    return;
+  }
+  
+  // Add report
+  addReport({
+    msgId,
+    videoId: videoData.videoId,
+    title: videoData.title,
+    userId,
+    userName
+  });
+  
+  // Notify admin
+  try {
+    await bot.api.sendMessage(ADMIN_ID, 
+      `🚫 <b>New Report</b>\n\n` +
+      `Video: ${videoData.title}\n` +
+      `Video ID: ${videoData.videoId}\n` +
+      `Reported by: @${userName} (ID: ${userId})\n` +
+      `Post: https://t.me/${CHANNEL_USERNAME.replace('@', '')}/${msgId}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (e) {}
+  
+  await ctx.answerCallbackQuery({ text: "Report sent to admin. Thank you!", show_alert: true });
 });
 
 function downloadHLS(hlsUrl, output) {
@@ -1353,7 +1704,11 @@ async function getUnpostedVideo(maxAttempts = 20) {
       }
       
       for (const video of videos) {
-        if (postedVideos.includes(video.videoId)) continue;
+        // Check by videoId and title hash
+        if (isVideoPosted(video.videoId, video.title)) {
+          console.log(`Skipping already posted: ${video.title}`);
+          continue;
+        }
         console.log(`Found video: ${video.title} (${video.duration})`);
         return { video, source };
       }
@@ -1372,7 +1727,8 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId, videoU
   
   const keyboard = new InlineKeyboard()
     .text(`👍 0`, `like_${messageId}`)
-    .text(`👎 0`, `dislike_${messageId}`);
+    .text(`👎 0`, `dislike_${messageId}`)
+    .text(`🚫 Report`, `report_${messageId}`);
   
   try {
     // Check if videoUrl is a direct video link (not get_media endpoint)
@@ -1624,8 +1980,7 @@ async function postVideoToChannel() {
       
       cleanup([finalFile]);
       
-      postedVideos.push(details.videoId);
-      savePostedVideos(postedVideos);
+      markVideoAsPosted(videoId, title);
       
       console.log(`Posted video to channel: ${title} (${sizeMB.toFixed(1)} MB, source: ${source})`);
       postingRetryCount = 0; // Reset retry counter on success
