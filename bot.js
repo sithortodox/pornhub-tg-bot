@@ -1222,12 +1222,6 @@ function downloadHLS(hlsUrl, output) {
       output
     ]);
     
-    const timeout = setTimeout(() => {
-      console.log("HLS download timeout, killing ffmpeg...");
-      ffmpeg.kill();
-      reject(new Error("HLS download timeout"));
-    }, 600000);
-    
     ffmpeg.stderr.on("data", (data) => {
       const str = data.toString();
       if (str.includes("frame=") || str.includes("Duration:")) {
@@ -1236,7 +1230,6 @@ function downloadHLS(hlsUrl, output) {
     });
     
     ffmpeg.on("close", (code) => {
-      clearTimeout(timeout);
       if (code === 0 || code === null) {
         resolve();
       } else {
@@ -1245,7 +1238,6 @@ function downloadHLS(hlsUrl, output) {
     });
     
     ffmpeg.on("error", (err) => {
-      clearTimeout(timeout);
       reject(err);
     });
   });
