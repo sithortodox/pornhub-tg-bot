@@ -1365,7 +1365,7 @@ async function getUnpostedVideo(maxAttempts = 20) {
   return null;
 }
 
-async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
+async function sendVideoViaFormData(chatId, filePath, caption, messageId, videoUrl) {
   const stats = statSync(filePath);
   const sizeMB = stats.size / (1024 * 1024);
   console.log(`Sending video to channel: ${sizeMB.toFixed(1)} MB`);
@@ -1375,7 +1375,20 @@ async function sendVideoViaFormData(chatId, filePath, caption, messageId) {
     .text(`👎 0`, `dislike_${messageId}`);
   
   try {
-    // Use grammy with InputFile - works with Local Bot API for large files
+    // For files > 50MB, try sending via URL (Telegram will download it)
+    if (sizeMB > 50 && videoUrl) {
+      console.log("Large file, sending via URL...");
+      const result = await bot.api.sendVideo(chatId, videoUrl, {
+        caption: caption,
+        parse_mode: "HTML",
+        supports_streaming: true,
+        reply_markup: keyboard,
+      });
+      console.log("Video sent via URL:", result ? true : false);
+      return { ok: true, result };
+    }
+    
+    // For smaller files, use InputFile
     const result = await bot.api.sendVideo(chatId, new InputFile(filePath), {
       caption: caption,
       parse_mode: "HTML",
@@ -1558,7 +1571,7 @@ async function postVideoToChannel() {
     const caption = generateEnglishCaption(title, duration, views, sizeMB, categories);
     
     try {
-      const sendResult = await sendVideoViaFormData(CHANNEL_ID, finalFile, caption, messageId);
+      const sendResult = await sendVideoViaFormData(CHANNEL_ID, finalFile, caption, messageId, videoUrl);
       console.log("Video sent successfully:", sendResult.ok);
       
       const actualMsgId = sendResult.result?.message_id?.toString() || messageId;
