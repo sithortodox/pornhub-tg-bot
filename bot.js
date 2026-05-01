@@ -2,6 +2,7 @@ import { Bot, session, InlineKeyboard, InputFile } from "grammy";
 import { createWriteStream, createReadStream, existsSync, statSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { tmpdir } from "os";
+import { spawn } from "child_process";
 import axios from "axios";
 import FormData from "form-data";
 import { fileURLToPath } from "url";
