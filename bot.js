@@ -16,6 +16,11 @@ if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
+const TMP_DIR = join(tmpdir(), "pornhub-bot");
+if (!existsSync(TMP_DIR)) {
+  mkdirSync(TMP_DIR, { recursive: true });
+}
+
 const POSTED_VIDEOS_FILE = join(DATA_DIR, "posted_videos.json");
 const POST_STATS_FILE = join(DATA_DIR, "post_stats.json");
 const SUBMISSIONS_FILE = join(DATA_DIR, "submissions.json");
